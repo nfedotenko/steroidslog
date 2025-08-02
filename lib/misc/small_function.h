@@ -5,41 +5,41 @@
 
 #pragma once
 
-template <size_t BufSize> class SmallFunction {
-    using Storage = std::aligned_storage_t<BufSize, alignof(void*)>;
-    using InvokeFn = void (*)(const Storage&);
-    using DestroyFn = void (*)(Storage&);
-    using CloneFn = void (*)(const Storage&, Storage&);
+#include <cstddef>
+#include <new>
+#include <utility>
 
-    Storage buf_;
-    InvokeFn invoke_{nullptr};
-    DestroyFn destroy_{nullptr};
-    CloneFn clone_{nullptr};
+template <size_t BufSize>
+class SmallFunction {
+    using InvokeFn = void(*)(SmallFunction&);
+    using DestroyFn = void(*)(SmallFunction&) noexcept;
+    using CloneFn = void(*)(const SmallFunction&, SmallFunction&);
 
 public:
     SmallFunction() = default;
 
-    template <typename F> SmallFunction(F f) {
+    template <typename F> 
+    SmallFunction(F f) {
         static_assert(sizeof(F) <= BufSize,
-                      "Capture too large for SmallFunction buffer");
-        new (&buf_) F(std::move(f));
-        invoke_ = +[](const Storage& s) {
-            const F& fn = *reinterpret_cast<const F*>(&s);
+                      "Callable too large for SmallFunction buffer");
+        new (buf_) F(std::move(f));
+        invoke_ = +[](SmallFunction& self) {
+            auto& fn = *reinterpret_cast<F*>(self.buf_);
             fn();
         };
-        destroy_ = +[](Storage& s) {
-            F& fn = *reinterpret_cast<F*>(&s);
+        destroy_ = +[](SmallFunction& self) noexcept {
+            auto& fn = *reinterpret_cast<F*>(self.buf_);
             fn.~F();
         };
-        clone_ = +[](const Storage& src, Storage& dst) {
-            const F& fn = *reinterpret_cast<const F*>(&src);
-            new (&dst) F(fn);
+        clone_ = +[](const SmallFunction& src, SmallFunction& dst) {
+            auto& fn = *reinterpret_cast<const F*>(src.buf_);
+            new (dst.buf_) F(fn);
         };
     }
 
     SmallFunction(const SmallFunction& o) {
         if (o.clone_) {
-            o.clone_(o.buf_, buf_);
+            o.clone_(o, *this);
             invoke_ = o.invoke_;
             destroy_ = o.destroy_;
             clone_ = o.clone_;
@@ -47,57 +47,76 @@ public:
     }
     SmallFunction(SmallFunction&& o) noexcept {
         if (o.clone_) {
-            o.clone_(o.buf_, buf_);
+            o.clone_(o, *this);
             invoke_ = o.invoke_;
             destroy_ = o.destroy_;
             clone_ = o.clone_;
-            o.destroy_(o.buf_);
-            o.invoke_ = o.destroy_ = o.clone_ = nullptr;
+            o.destroy_(o);
+            o.invoke_ = nullptr;
+            o.destroy_ = nullptr;
+            o.clone_ = nullptr;
         }
     }
 
     SmallFunction& operator=(const SmallFunction& o) {
         if (this != &o) {
-            if (destroy_)
-                destroy_(buf_);
+            if (destroy_) {
+                destroy_(*this);
+            }
             if (o.clone_) {
-                o.clone_(o.buf_, buf_);
+                o.clone_(o, *this);
                 invoke_ = o.invoke_;
                 destroy_ = o.destroy_;
                 clone_ = o.clone_;
             } else {
-                invoke_ = destroy_ = clone_ = nullptr;
+                invoke_ = nullptr;
+                destroy_ = nullptr;
+                clone_ = nullptr;
             }
         }
         return *this;
     }
     SmallFunction& operator=(SmallFunction&& o) noexcept {
         if (this != &o) {
-            if (destroy_)
-                destroy_(buf_);
+            if (destroy_) {
+                destroy_(*this);
+            }
             if (o.clone_) {
-                o.clone_(o.buf_, buf_);
+                o.clone_(o, *this);
                 invoke_ = o.invoke_;
                 destroy_ = o.destroy_;
                 clone_ = o.clone_;
-                o.destroy_(o.buf_);
-                o.invoke_ = o.destroy_ = o.clone_ = nullptr;
+                o.destroy_(o);
+                o.invoke_ = nullptr;
+                o.destroy_ = nullptr;
+                o.clone_ = nullptr;
             } else {
-                invoke_ = destroy_ = clone_ = nullptr;
+                invoke_ = nullptr;
+                destroy_ = nullptr;
+                clone_ = nullptr;
             }
         }
         return *this;
     }
 
     ~SmallFunction() {
-        if (destroy_)
-            destroy_(buf_);
+        if (destroy_) {
+            destroy_(*this);
+        }
     }
 
-    void operator()() const {
-        if (invoke_)
-            invoke_(buf_);
+    void operator()() {
+        if (invoke_) {
+            invoke_(*this);
+        }
     }
 
     explicit operator bool() const { return invoke_ != nullptr; }
+
+private:
+    alignas(std::max_align_t) std::byte buf_[BufSize];
+
+    InvokeFn invoke_{nullptr};
+    DestroyFn destroy_{nullptr};
+    CloneFn clone_{nullptr};
 };

@@ -1,9 +1,10 @@
 # steroidslog
 
+WIP
+
 TODO
-1. Use per-thread queues & a polling aggregator
-2. Pre-compile format strings
-3. Add compile-time log-level filtering
+1. Pre-compile format strings
+2. Add compile-time log-level filtering
 
 ---
 

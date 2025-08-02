@@ -5,6 +5,119 @@
 
 #include <gtest/gtest.h>
 
+#include "steroidslog/steroidslog.h"
+
+#include <chrono>
+#include <sstream>
+#include <thread>
+
+// Utility RAII to capture std::cout
+struct CoutCapture {
+    CoutCapture() : old_buf(std::cout.rdbuf(capture.rdbuf())) {}
+    ~CoutCapture() { std::cout.rdbuf(old_buf); }
+    std::ostringstream capture;
+
+private:
+    std::streambuf* old_buf;
+};
+
+// Tests for SimpleMap
+TEST(SimpleMapTests, SameCallSiteYieldsSameString) {
+    static constexpr auto ID1 = []() constexpr { return "alpha"; };
+    auto& s1 = SimpleMap::get(ID1);
+    auto& s2 = SimpleMap::get(ID1);
+    EXPECT_EQ(s1, "alpha");
+    EXPECT_EQ(&s1, &s2); // same storage
+}
+
+TEST(SimpleMapTests, DifferentCallSitesAreDifferent) {
+    static constexpr auto IDa = []() constexpr { return "foo"; };
+    static constexpr auto IDb = []() constexpr { return "bar"; };
+    auto& sa = SimpleMap::get(IDa);
+    auto& sb = SimpleMap::get(IDb);
+    EXPECT_EQ(sa, "foo");
+    EXPECT_EQ(sb, "bar");
+    EXPECT_NE(&sa, &sb); // different storage
+}
+
+// Tests for SmallFunction
+TEST(SmallFunctionTests, InvokesNonConstLambda) {
+    int counter = 0;
+    SmallFunction<64> fn{[&] { ++counter; }};
+    ASSERT_TRUE(fn);
+    fn();
+    EXPECT_EQ(counter, 1);
+    fn();
+    EXPECT_EQ(counter, 2);
+}
+
+TEST(SmallFunctionTests, CopyAndMoveSemantics) {
+    int x = 0;
+    SmallFunction<64> orig{[&] { x += 10; }};
+    SmallFunction<64> copy = orig; // copy
+    SmallFunction<64> moved = std::move(orig);
+    // orig is now empty; moved and copy both callable
+    EXPECT_TRUE(copy);
+    EXPECT_TRUE(moved);
+    EXPECT_FALSE(orig);
+    copy();  // x += 10
+    moved(); // x += 10
+    EXPECT_EQ(x, 20);
+}
+
+// Tests for Logger formatting and ordering
+TEST(LoggerTests, SingleThreadFormatting) {
+    CoutCapture capture;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    LOG_INFO("Test {}", 42);
+    LOG_DEBUG("Hello {}", std::string("world"));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    auto out = capture.capture.str();
+
+    size_t p1 = out.find("[INFO] Test 42");
+    size_t p2 = out.find("[DEBUG] Hello world");
+    EXPECT_NE(p1, std::string::npos);
+    EXPECT_NE(p2, std::string::npos);
+    EXPECT_LT(p1, p2);
+}
+
+TEST(LoggerTests, MultiThreadInterleaving) {
+    CoutCapture capture;
+    std::thread t([&] {
+        for (int i = 0; i < 5; ++i) {
+            LOG_DEBUG("T{}", i);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    });
+
+    for (int i = 0; i < 5; ++i) {
+        LOG_INFO("M{}", i);
+        std::this_thread::sleep_for(std::chrono::milliseconds(7));
+    }
+    t.join();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    auto out = capture.capture.str();
+
+    for (int i = 0; i < 5; ++i) {
+        EXPECT_NE(out.find("[DEBUG] T" + std::to_string(i)), std::string::npos);
+        EXPECT_NE(out.find("[INFO] M" + std::to_string(i)), std::string::npos);
+    }
+}
+
+// Shutdown does not corrupt messages
+TEST(LoggerTests, ShutdownFlushesQueue) {
+    CoutCapture capture;
+    auto& log = Logger::instance();
+
+    LOG_INFO("Before shutdown");
+    log.shutdown();
+
+    auto out = capture.capture.str();
+    EXPECT_NE(out.find("[INFO] Before shutdown"), std::string::npos);
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
