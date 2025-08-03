@@ -9,7 +9,7 @@
 
 enum class LogLevel : uint8_t { Debug, Info, Warning, Error, Unknown };
 
-constexpr const char* to_string(LogLevel lvl) {
+consteval const char* to_string(LogLevel lvl) {
     if (lvl == LogLevel::Debug) {
         return "DEBUG";
     } else if (lvl == LogLevel::Info) {

@@ -18,6 +18,11 @@
 #include <tuple>
 #include <utility>
 
+#ifdef __GNUC__
+#include <pthread.h>
+#include <sched.h>
+#endif
+
 class Logger {
     static constexpr size_t FUNCTION_CAP = 256;
     static constexpr size_t QUEUE_CAP = 1024;
@@ -41,19 +46,19 @@ public:
         shutdown();
     }
 
-    template <typename Id, typename... Args>
-    void enqueue(LogLevel lvl, Id id, Args&&... args) {
+    template <LogLevel Lvl, typename Id, typename... Args>
+    void enqueue(Id id, Args&&... args) {
         small_function task{
-            [lvl, id,
+            [id,
              tup = std::make_tuple(std::forward<Args>(args)...)]() mutable {
-                auto fmt_str = pseudo_map::get(id);
-                auto s = std::apply(
+                auto&& fmt_str = pseudo_map::get(id);
+                auto&& s = std::apply(
                     [&](auto&... unpacked) {
                         return std::vformat(fmt_str,
                                             std::make_format_args(unpacked...));
                     },
                     tup);
-                std::cout << '[' << to_string(lvl) << "] " << s << '\n';
+                std::cout << '[' << to_string(Lvl) << "] " << s << '\n';
             }
         };
         while (!queue_.enqueue(std::move(task))) {
@@ -63,26 +68,35 @@ public:
 
     template <typename Id, typename... A>
     void debug(Id id, A&&... a) {
-        enqueue(LogLevel::Debug, id, std::forward<A>(a)...);
+        enqueue<LogLevel::Debug>(id, std::forward<A>(a)...);
     }
 
     template <typename Id, typename... A>
     void info(Id id, A&&... a) {
-        enqueue(LogLevel::Info, id, std::forward<A>(a)...);
+        enqueue<LogLevel::Info>(id, std::forward<A>(a)...);
     }
 
     template <typename Id, typename... A>
     void warn(Id id, A&&... a) {
-        enqueue(LogLevel::Warning, id, std::forward<A>(a)...);
+        enqueue<LogLevel::Warning>(id, std::forward<A>(a)...);
     }
 
     template <typename Id, typename... A>
     void error(Id id, A&&... a) {
-        enqueue(LogLevel::Error, id, std::forward<A>(a)...);
+        enqueue<LogLevel::Error>(id, std::forward<A>(a)...);
     }
 
 private:
-    Logger() : done_{false}, worker_{[this] { run(); }} {}
+    Logger()
+        : done_{false}, worker_{[this] { run(); }} 
+    {
+#ifdef __GNUC__
+        cpu_set_t cpus;
+        CPU_ZERO(&cpus);
+        CPU_SET(1, &cpus); // pin to CPU #1
+        pthread_setaffinity_np(worker_.native_handle(), sizeof(cpus), &cpus);
+#endif
+    }
 
     void run() {
         small_function task;
@@ -98,7 +112,7 @@ private:
         }
     }
 
-    spsc_queue queue_;
+    spsc_queue queue_{};
     std::atomic<bool> done_;
     std::thread worker_;
 };

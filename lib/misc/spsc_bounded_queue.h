@@ -17,7 +17,8 @@ class spsc_bounded_queue {
 
 public:
     spsc_bounded_queue() noexcept
-        : head_(0), tail_(0), head_cache_(0), tail_cache_(0) {}
+        : head_(0), tail_(0), head_cache_(0), tail_cache_(0)
+    {}
 
     bool enqueue(const T& item) noexcept {
         const size_t tail = tail_.load(std::memory_order_relaxed);
