@@ -6,24 +6,25 @@
 #pragma once
 
 #include "log_levels.h"
-#include "misc/spsc_bounded_queue.h"
 #include "misc/pseudomap.h"
 #include "misc/small_function.h"
+#include "misc/spsc_bounded_queue.h"
 
 #include <atomic>
 #include <format>
 #include <iostream>
-#include <mutex>
 #include <string_view>
 #include <thread>
 #include <tuple>
 #include <utility>
-#include <vector>
 
 class Logger {
-    using small_function = SmallFunction<256>;
+    static constexpr size_t FUNCTION_CAP = 256;
+    static constexpr size_t QUEUE_CAP = 1024;
+    using small_function = SmallFunction<FUNCTION_CAP>;
+    using spsc_queue = spsc_bounded_queue<small_function, QUEUE_CAP>;
 
-public: 
+public:
     static Logger& instance() {
         static Logger inst;
         return inst;
@@ -45,7 +46,7 @@ public:
         small_function task{
             [lvl, id,
              tup = std::make_tuple(std::forward<Args>(args)...)]() mutable {
-                auto fmt_str = SimpleMap::get(id);
+                auto fmt_str = pseudo_map::get(id);
                 auto s = std::apply(
                     [&](auto&... unpacked) {
                         return std::vformat(fmt_str,
@@ -53,7 +54,8 @@ public:
                     },
                     tup);
                 std::cout << '[' << to_string(lvl) << "] " << s << '\n';
-            }};
+            }
+        };
         while (!queue_.enqueue(std::move(task))) {
             std::this_thread::yield();
         }
@@ -85,7 +87,6 @@ private:
     void run() {
         small_function task;
         while (!done_.load(std::memory_order_acquire)) {
-            small_function task;
             if (queue_.dequeue(task)) {
                 task();
             } else {
@@ -97,8 +98,7 @@ private:
         }
     }
 
-    static constexpr size_t QUEUE_CAP = 1024;
-    spsc_bounded_queue<small_function, QUEUE_CAP> queue_;
+    spsc_queue queue_;
     std::atomic<bool> done_;
     std::thread worker_;
 };

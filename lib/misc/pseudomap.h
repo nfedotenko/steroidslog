@@ -7,7 +7,7 @@
 
 #include <string_view>
 
-namespace SimpleMap {
+namespace pseudo_map {
 
 template <typename Identifier>
 struct Entry {
@@ -24,4 +24,4 @@ std::string_view& get(Identifier id) {
     return Entry<Identifier>::value;
 }
 
-} // namespace SimpleMap
+} // namespace pseudo_map

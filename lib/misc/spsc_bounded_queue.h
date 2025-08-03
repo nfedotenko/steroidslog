@@ -67,6 +67,7 @@ private:
     static constexpr size_t Capacity = ReqCap;
     static constexpr size_t Mask = Capacity - 1;
     static constexpr size_t CACHE_LINE_SIZE = 64;
+
     alignas(CACHE_LINE_SIZE) T buffer_[Capacity];
     alignas(CACHE_LINE_SIZE) std::atomic<size_t> head_, tail_;
     size_t head_cache_, tail_cache_;

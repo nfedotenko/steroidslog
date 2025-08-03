@@ -21,20 +21,20 @@ private:
     std::streambuf* old_buf;
 };
 
-// Tests for SimpleMap
-TEST(SimpleMapTests, SameCallSiteYieldsSameString) {
+// Tests for pseudo_map
+TEST(PseudoMapTests, SameCallSiteYieldsSameString) {
     static constexpr auto ID1 = []() constexpr { return "alpha"; };
-    auto& s1 = SimpleMap::get(ID1);
-    auto& s2 = SimpleMap::get(ID1);
+    auto& s1 = pseudo_map::get(ID1);
+    auto& s2 = pseudo_map::get(ID1);
     EXPECT_EQ(s1, "alpha");
     EXPECT_EQ(&s1, &s2); // same storage
 }
 
-TEST(SimpleMapTests, DifferentCallSitesAreDifferent) {
+TEST(PseudoMapTests, DifferentCallSitesAreDifferent) {
     static constexpr auto IDa = []() constexpr { return "foo"; };
     static constexpr auto IDb = []() constexpr { return "bar"; };
-    auto& sa = SimpleMap::get(IDa);
-    auto& sb = SimpleMap::get(IDb);
+    auto& sa = pseudo_map::get(IDa);
+    auto& sb = pseudo_map::get(IDb);
     EXPECT_EQ(sa, "foo");
     EXPECT_EQ(sb, "bar");
     EXPECT_NE(&sa, &sb); // different storage

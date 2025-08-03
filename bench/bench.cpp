@@ -11,16 +11,16 @@
 using benchmark::ClobberMemory;
 using benchmark::DoNotOptimize;
 
-// SimpleMap lookup: measure ID-lambda lookup cost
-static void BM_SimpleMapGet(benchmark::State& state) {
+// pseudo_map lookup: measure ID-lambda lookup cost
+static void BM_PseudoMapGet(benchmark::State& state) {
     constexpr auto id = []() constexpr { return "fmt {}"; };
     for (auto _ : state) {
-        auto s = SimpleMap::get(id); // first call initializes, thereafter fast lookup
+        auto s = pseudo_map::get(id); // first call initializes, thereafter fast lookup
         DoNotOptimize(s);
         ClobberMemory();
     }
 }
-BENCHMARK(BM_SimpleMapGet)->Threads(1)->Threads(4);
+BENCHMARK(BM_PseudoMapGet)->Threads(1)->Threads(4);
 
 // Enqueue with no formatting arguments
 static void BM_EnqueueNoArgs(benchmark::State& state) {
