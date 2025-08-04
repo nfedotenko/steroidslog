@@ -40,31 +40,6 @@ TEST(PseudoMapTests, DifferentCallSitesAreDifferent) {
     EXPECT_NE(&sa, &sb); // different storage
 }
 
-// Tests for SmallFunction
-TEST(SmallFunctionTests, InvokesNonConstLambda) {
-    int counter = 0;
-    SmallFunction<64> fn{[&] { ++counter; }};
-    ASSERT_TRUE(fn);
-    fn();
-    EXPECT_EQ(counter, 1);
-    fn();
-    EXPECT_EQ(counter, 2);
-}
-
-TEST(SmallFunctionTests, CopyAndMoveSemantics) {
-    int x = 0;
-    SmallFunction<64> orig{[&] { x += 10; }};
-    SmallFunction<64> copy = orig; // copy
-    SmallFunction<64> moved = std::move(orig);
-    // orig is now empty; moved and copy both callable
-    EXPECT_TRUE(copy);
-    EXPECT_TRUE(moved);
-    EXPECT_FALSE(orig);
-    copy();  // x += 10
-    moved(); // x += 10
-    EXPECT_EQ(x, 20);
-}
-
 // Tests for Logger formatting and ordering
 TEST(LoggerTests, SingleThreadFormatting) {
     CoutCapture capture;

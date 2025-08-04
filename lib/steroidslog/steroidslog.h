@@ -7,10 +7,10 @@
 
 #include "log_levels.h"
 #include "misc/pseudomap.h"
-#include "misc/small_function.h"
 #include "misc/spsc_bounded_queue.h"
 
 #include <atomic>
+#include <cstring>
 #include <format>
 #include <iostream>
 #include <string_view>
@@ -18,16 +18,17 @@
 #include <tuple>
 #include <utility>
 
-#ifdef __GNUC__
-#include <pthread.h>
-#include <sched.h>
-#endif
-
 class Logger {
-    static constexpr size_t FUNCTION_CAP = 256;
     static constexpr size_t QUEUE_CAP = 1024;
-    using small_function = SmallFunction<FUNCTION_CAP>;
-    using spsc_queue = spsc_bounded_queue<small_function, QUEUE_CAP>;
+    static constexpr size_t MAX_MSG_LEN = 256;
+
+    struct LogEntry {
+        LogLevel level;
+        uint16_t len;          // length of valid chars in msg[]
+        char msg[MAX_MSG_LEN]; // UTF-8 / ASCII payload
+    };
+
+    using queue_t = spsc_bounded_queue<LogEntry, QUEUE_CAP>;
 
 public:
     static Logger& instance() {
@@ -48,20 +49,16 @@ public:
 
     template <LogLevel Lvl, typename Id, typename... Args>
     void enqueue(Id id, Args&&... args) {
-        small_function task{
-            [id,
-             tup = std::make_tuple(std::forward<Args>(args)...)]() mutable {
-                auto&& fmt_str = pseudo_map::get(id);
-                auto&& s = std::apply(
-                    [&](auto&... unpacked) {
-                        return std::vformat(fmt_str,
-                                            std::make_format_args(unpacked...));
-                    },
-                    tup);
-                std::cout << '[' << to_string(Lvl) << "] " << s << '\n';
-            }
-        };
-        while (!queue_.enqueue(std::move(task))) {
+        auto&& fmt = pseudo_map::get(id);
+        auto&& s = std::vformat(fmt, std::make_format_args(args...));
+
+        LogEntry e{};
+        e.level = Lvl;
+        e.len = static_cast<uint16_t>(std::min(s.size(), MAX_MSG_LEN - 1));
+        std::memcpy(e.msg, s.data(), e.len);
+        e.msg[e.len] = '\0';
+
+        while (!queue_.enqueue(e)) {
             std::this_thread::yield();
         }
     }
@@ -88,31 +85,35 @@ public:
 
 private:
     Logger()
-        : done_{false}, worker_{[this] { run(); }} 
-    {
-#ifdef __GNUC__
-        cpu_set_t cpus;
-        CPU_ZERO(&cpus);
-        CPU_SET(1, &cpus); // pin to CPU #1
-        pthread_setaffinity_np(worker_.native_handle(), sizeof(cpus), &cpus);
-#endif
-    }
+        : done_{false}, worker_{ [this] { run(); } } 
+    {}
 
     void run() {
-        small_function task;
+        LogEntry e{};
         while (!done_.load(std::memory_order_acquire)) {
-            if (queue_.dequeue(task)) {
-                task();
+            if (queue_.dequeue(e)) {
+                std::cout.write("[", 1);
+                const auto* lvl = to_string(e.level);
+                std::cout.write(lvl, std::char_traits<char>::length(lvl));
+                std::cout.write("] ", 2);
+                std::cout.write(e.msg, e.len);
+                std::cout.put('\n');
             } else {
                 std::this_thread::yield();
             }
         }
-        while (queue_.dequeue(task)) {
-            task();
+        // flush any remaining entries
+        while (queue_.dequeue(e)) {
+            std::cout.write("[", 1);
+            const auto* lvl = to_string(e.level);
+            std::cout.write(lvl, std::char_traits<char>::length(lvl));
+            std::cout.write("] ", 2);
+            std::cout.write(e.msg, e.len);
+            std::cout.put('\n');
         }
     }
 
-    spsc_queue queue_{};
+    queue_t queue_{};
     std::atomic<bool> done_;
     std::thread worker_;
 };
