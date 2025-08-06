@@ -10,6 +10,8 @@
 #include <type_traits>
 #include <utility>
 
+namespace steroidslog {
+
 template <typename T, size_t ReqCap>
 class spsc_bounded_queue {
     static_assert((ReqCap & (ReqCap - 1)) == 0,
@@ -73,3 +75,5 @@ private:
     alignas(CACHE_LINE_SIZE) std::atomic<size_t> head_, tail_;
     size_t head_cache_, tail_cache_;
 };
+
+} // namespace steroidslog

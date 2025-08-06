@@ -5,8 +5,6 @@
 
 #pragma once
 
-#include "log_levels.h"
-#include "misc/pseudomap.h"
 #include "misc/spsc_bounded_queue.h"
 
 #include <atomic>
@@ -18,12 +16,34 @@
 #include <tuple>
 #include <utility>
 
+namespace steroidslog {
+
+enum class LogLevel : uint8_t { Debug, Info, Warning, Error, Unknown };
+
+namespace pseudomap {
+
+template <typename Identifier> struct Entry {
+    inline static bool init = false;
+    inline static std::string_view value;
+};
+
+template <typename Identifier> std::string_view& get(Identifier id) {
+    if (!Entry<Identifier>::init) {
+        Entry<Identifier>::value = id();
+        Entry<Identifier>::init = true;
+    }
+    return Entry<Identifier>::value;
+}
+
+} // namespace pseudomap
+
+/** Main logger class */
+
 class Logger {
     static constexpr size_t QUEUE_CAP = 1024;
     static constexpr size_t MAX_MSG_LEN = 256;
 
     struct LogEntry {
-        LogLevel level;
         uint16_t len;          // length of valid chars in msg[]
         char msg[MAX_MSG_LEN]; // UTF-8 / ASCII payload
     };
@@ -47,40 +67,17 @@ public:
         shutdown();
     }
 
-    template <LogLevel Lvl, typename Id, typename... Args>
+    template <typename Id, typename... Args>
     void enqueue(Id id, Args&&... args) {
-        auto&& fmt = pseudo_map::get(id);
+        auto&& fmt = pseudomap::get(id);
         auto&& s = std::vformat(fmt, std::make_format_args(args...));
 
         LogEntry e{};
-        e.level = Lvl;
         e.len = static_cast<uint16_t>(std::min(s.size(), MAX_MSG_LEN - 1));
         std::memcpy(e.msg, s.data(), e.len);
         e.msg[e.len] = '\0';
 
-        while (!queue_.enqueue(e)) {
-            std::this_thread::yield();
-        }
-    }
-
-    template <typename Id, typename... A>
-    void debug(Id id, A&&... a) {
-        enqueue<LogLevel::Debug>(id, std::forward<A>(a)...);
-    }
-
-    template <typename Id, typename... A>
-    void info(Id id, A&&... a) {
-        enqueue<LogLevel::Info>(id, std::forward<A>(a)...);
-    }
-
-    template <typename Id, typename... A>
-    void warn(Id id, A&&... a) {
-        enqueue<LogLevel::Warning>(id, std::forward<A>(a)...);
-    }
-
-    template <typename Id, typename... A>
-    void error(Id id, A&&... a) {
-        enqueue<LogLevel::Error>(id, std::forward<A>(a)...);
+        queue_.enqueue(e);
     }
 
 private:
@@ -92,10 +89,6 @@ private:
         LogEntry e{};
         while (!done_.load(std::memory_order_acquire)) {
             if (queue_.dequeue(e)) {
-                std::cout.write("[", 1);
-                const auto* lvl = to_string(e.level);
-                std::cout.write(lvl, std::char_traits<char>::length(lvl));
-                std::cout.write("] ", 2);
                 std::cout.write(e.msg, e.len);
                 std::cout.put('\n');
             } else {
@@ -104,10 +97,6 @@ private:
         }
         // flush any remaining entries
         while (queue_.dequeue(e)) {
-            std::cout.write("[", 1);
-            const auto* lvl = to_string(e.level);
-            std::cout.write(lvl, std::char_traits<char>::length(lvl));
-            std::cout.write("] ", 2);
             std::cout.write(e.msg, e.len);
             std::cout.put('\n');
         }
@@ -118,26 +107,33 @@ private:
     std::thread worker_;
 };
 
+} // namespace steroidslog
+
+/** Macros */
 #define LOG_DEBUG(fmt, ...)                                                    \
     {                                                                          \
-        constexpr auto _log_id = []() constexpr { return fmt; };               \
-        Logger::instance().debug(_log_id __VA_OPT__(, ) __VA_ARGS__);          \
+        constexpr auto _log_id = []() constexpr { return "[DEBUG] " fmt; };    \
+        steroidslog::Logger::instance().enqueue(_log_id __VA_OPT__(, )         \
+                                                    __VA_ARGS__);              \
     }
 
 #define LOG_INFO(fmt, ...)                                                     \
     {                                                                          \
-        constexpr auto _log_id = []() constexpr { return fmt; };               \
-        Logger::instance().info(_log_id __VA_OPT__(, ) __VA_ARGS__);           \
+        constexpr auto _log_id = []() constexpr { return "[INFO] " fmt; };     \
+        steroidslog::Logger::instance().enqueue(_log_id __VA_OPT__(, )         \
+                                                    __VA_ARGS__);              \
     }
 
 #define LOG_WARN(fmt, ...)                                                     \
     {                                                                          \
-        constexpr auto _log_id = []() constexpr { return fmt; };               \
-        Logger::instance().warn(_log_id __VA_OPT__(, ) __VA_ARGS__);           \
+        constexpr auto _log_id = []() constexpr { return "[WARNING] " fmt; };  \
+        steroidslog::Logger::instance().enqueue(_log_id __VA_OPT__(, )         \
+                                                    __VA_ARGS__);              \
     }
 
 #define LOG_ERROR(fmt, ...)                                                    \
     {                                                                          \
-        constexpr auto _log_id = []() constexpr { return fmt; };               \
-        Logger::instance().error(_log_id __VA_OPT__(, ) __VA_ARGS__);          \
+        constexpr auto _log_id = []() constexpr { return "[ERROR] " fmt; };    \
+        steroidslog::Logger::instance().enqueue(_log_id __VA_OPT__(, )         \
+                                                    __VA_ARGS__);              \
     }

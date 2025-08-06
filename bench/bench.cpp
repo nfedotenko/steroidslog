@@ -7,15 +7,17 @@
 
 #include "steroidslog/steroidslog.h"
 
+using namespace steroidslog;
+
 // Prevent the compiler from optimizing away results
 using benchmark::ClobberMemory;
 using benchmark::DoNotOptimize;
 
-// pseudo_map lookup: measure ID-lambda lookup cost
+// pseudomap lookup: measure ID-lambda lookup cost
 static void BM_PseudoMapGet(benchmark::State& state) {
     constexpr auto id = []() constexpr { return "fmt {}"; };
     for (auto _ : state) {
-        auto s = pseudo_map::get(id); // first call initializes, thereafter fast lookup
+        auto s = pseudomap::get(id); // first call initializes, thereafter fast lookup
         DoNotOptimize(s);
         ClobberMemory();
     }
