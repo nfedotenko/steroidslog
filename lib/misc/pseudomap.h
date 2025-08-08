@@ -73,7 +73,7 @@ bool static_map<Key, Value, Tag>::init_flag = false;
 
 using pseudomap = static_map<uint32_t, std::string_view>;
 
-constexpr auto fnv1a_32(const char* s, uint32_t v = 2166136261u) noexcept {
+constexpr uint32_t fnv1a_32(const char* s, uint32_t v = 2166136261u) noexcept {
     return (*s == '\0')
             ? v
             : fnv1a_32(s + 1, (v ^ static_cast<uint8_t>(*s)) * 16777619u);
