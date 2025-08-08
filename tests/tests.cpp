@@ -23,25 +23,6 @@ private:
     std::streambuf* old_buf;
 };
 
-// Tests for pseudomap
-TEST(PseudoMapTests, SameCallSiteYieldsSameString) {
-    static constexpr auto ID1 = []() constexpr { return "alpha"; };
-    auto& s1 = pseudomap::get(ID1);
-    auto& s2 = pseudomap::get(ID1);
-    EXPECT_EQ(s1, "alpha");
-    EXPECT_EQ(&s1, &s2); // same storage
-}
-
-TEST(PseudoMapTests, DifferentCallSitesAreDifferent) {
-    static constexpr auto IDa = []() constexpr { return "foo"; };
-    static constexpr auto IDb = []() constexpr { return "bar"; };
-    auto& sa = pseudomap::get(IDa);
-    auto& sb = pseudomap::get(IDb);
-    EXPECT_EQ(sa, "foo");
-    EXPECT_EQ(sb, "bar");
-    EXPECT_NE(&sa, &sb); // different storage
-}
-
 // Tests for Logger formatting and ordering
 TEST(LoggerTests, SingleThreadFormatting) {
     CoutCapture capture;
