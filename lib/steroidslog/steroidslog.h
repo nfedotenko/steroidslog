@@ -8,56 +8,76 @@
 #include "misc/pseudomap.h"
 #include "misc/spsc_bounded_queue.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <format>
 #include <iostream>
 #include <span>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
 #include <variant>
 
+#define SL_CACHELINE 64
+
 namespace steroidslog {
 
-static constexpr size_t MAX_ARGS = 8;
-static constexpr size_t QUEUE_CAP = 1024;
-static constexpr size_t MAX_MSG_LEN = 256;
+//------------------------------------------------------------------------------
+// Tunables
+//------------------------------------------------------------------------------
+static constexpr std::size_t MAX_ARGS = 8;
+static constexpr std::size_t QUEUE_CAP = 1024;  // per-thread SPSC capacity
+static constexpr std::size_t MAX_MSG_LEN = 256; // emit truncation cap
+static constexpr int BATCH_DEQ = 64;            // backend batch per queue
 
+//------------------------------------------------------------------------------
+// Arg packing
+//------------------------------------------------------------------------------
 using arg_slot_t = std::variant<uint64_t, double, std::string_view>;
 
-template <typename T>
+template <class T>
 constexpr arg_slot_t make_argslot(T&& v) {
     using U = std::remove_cvref_t<T>;
-
-    if constexpr (std::is_integral_v<U> || std::is_pointer_v<U>) {
-        return static_cast<uint64_t>(v);
+    if constexpr (std::is_integral_v<U>) {
+        return static_cast<uint64_t>(static_cast<uintptr_t>(v));
     } else if constexpr (std::is_floating_point_v<U>) {
         return static_cast<double>(v);
     } else if constexpr (std::is_convertible_v<U, std::string_view>) {
         return std::string_view(v);
     } else {
-        static_assert(false, "Unsupported type for log argument");
+        static_assert(!sizeof(U), "Unsupported type for log argument");
     }
 }
 
 struct RawLogRecord {
-    uint32_t   fmt_id;    // compile-time hash
-    uint8_t    arg_count; // not greater than MAX_ARGS
+    uint32_t fmt_id;   // compile-time hash
+    uint8_t arg_count; // <= MAX_ARGS
     arg_slot_t args[MAX_ARGS];
 };
 
-//==============================================================================
+//------------------------------------------------------------------------------
 
 class Logger {
     using queue_t = spsc_bounded_queue<RawLogRecord, QUEUE_CAP>;
+
+    struct ProducerNode {
+        alignas(SL_CACHELINE) queue_t q;
+        alignas(SL_CACHELINE) std::atomic<bool> active{true};
+        ProducerNode* next{nullptr};
+    };
 
 public:
     static Logger& instance() {
         static Logger inst;
         return inst;
     }
+
+    ~Logger() { shutdown(); }
 
     void shutdown() {
         done_.store(true, std::memory_order_release);
@@ -66,32 +86,62 @@ public:
         }
     }
 
-    ~Logger() {
-        shutdown();
-    }
-
-    template <uint32_t Id, typename... Args>
-    void enqueue(Args&&... args) {
+    template <uint32_t Id, class... Args>
+    void enqueue(Args&&... args) noexcept {
         static_assert(sizeof...(Args) <= MAX_ARGS, "Too many log args");
-        RawLogRecord rec{ Id, static_cast<uint8_t>(sizeof...(Args)), {} };
-        arg_slot_t tmp[] = { make_argslot(std::forward<Args>(args))... };
+        ProducerNode* node = ensure_tls_node();
+
+        RawLogRecord rec{Id, static_cast<uint8_t>(sizeof...(Args)), {}};
+        arg_slot_t tmp[] = {make_argslot(std::forward<Args>(args))...};
         std::memcpy(rec.args, tmp, sizeof(tmp));
-        queue_.enqueue(rec);
+
+        // Non-blocking try; drop if full to avoid stalling producers.
+        for (int tries = 0; tries < 4; ++tries) {
+            if (node->q.enqueue(std::move(rec))) {
+                return;
+            }
+        }
     }
 
 private:
-    Logger()
-        : done_{false}, worker_{ [this] { run(); } } 
-    {}
+    Logger() : worker_{[this] { run(); }} {}
+
+    static ProducerNode* register_node_() {
+        auto* n = new ProducerNode();
+        // Push-front intrusive list
+        ProducerNode* old = head_.load(std::memory_order_relaxed);
+        do {
+            n->next = old;
+        } while (!head_.compare_exchange_weak(old, n, std::memory_order_release,
+                                              std::memory_order_relaxed));
+        return n;
+    }
+
+    struct TL {
+        ProducerNode* node{nullptr};
+
+        ~TL() {
+            if (node) {
+                node->active.store(false, std::memory_order_release);
+            }
+        }
+    };
+
+    ProducerNode* ensure_tls_node() {
+        if (!tls_.node) {
+            tls_.node = register_node_();
+        }
+        return tls_.node;
+    }
 
     void run() {
-        auto format_simple =
-            [](std::string_view fmt,
-               std::span<const std::string_view> args) {
+        auto format_simple = [](std::string_view fmt,
+                                std::span<std::string_view> args) {
             std::string out;
             out.reserve(fmt.size() + 32);
-            size_t ai = 0;
-            for (size_t i = 0; i < fmt.size();) {
+            std::size_t ai = 0;
+
+            for (std::size_t i = 0; i < fmt.size();) {
                 char c = fmt[i];
                 if (c == '{') {
                     if (i + 1 < fmt.size() && fmt[i + 1] == '{') { // escaped {{
@@ -124,11 +174,15 @@ private:
         };
 
         auto format_and_emit = [&](const RawLogRecord& rec) {
-            auto&& fmt = pseudomap::get(rec.fmt_id);
+            std::string_view fmt(pseudomap::get(rec.fmt_id));
+            // Fallback if not registered for some reason
+            if (fmt.empty()) {
+                fmt = std::string_view{"{}"};
+            }
 
-            std::array<std::string, MAX_ARGS> storage{};
-            std::array<std::string_view, MAX_ARGS> views{};
-            for (size_t i = 0; i < rec.arg_count; ++i) {
+            std::array<std::string, MAX_ARGS> storage;
+            std::array<std::string_view, MAX_ARGS> views;
+            for (std::size_t i = 0; i < rec.arg_count; ++i) {
                 std::visit(
                     [&](auto&& val) {
                         using V = std::remove_cvref_t<decltype(val)>;
@@ -136,7 +190,7 @@ private:
                             storage[i] = std::to_string(val);
                         } else if constexpr (std::is_same_v<V, double>) {
                             storage[i] = std::to_string(val);
-                        } else { // std::string_view
+                        } else { // string_view
                             storage[i] = std::string(val);
                         }
                         views[i] = storage[i];
@@ -144,78 +198,113 @@ private:
                     rec.args[i]);
             }
 
-            auto&& s = format_simple(fmt,
-                std::span<const std::string_view>(views.data(), rec.arg_count));
-
-            const auto n = std::min(s.size(), size_t(MAX_MSG_LEN - 1));
+            std::string s = format_simple(fmt,
+                std::span<std::string_view>{views.data(), rec.arg_count});
+            const std::size_t n =
+                std::min<std::size_t>(s.size(), MAX_MSG_LEN - 1);
             std::cout.write(s.data(), static_cast<std::streamsize>(n));
             std::cout.put('\n');
         };
 
         RawLogRecord rec;
-
         while (!done_.load(std::memory_order_acquire)) {
-            if (queue_.dequeue(rec)) {
-                format_and_emit(rec);
-            } else {
+            bool did = false;
+            // Poll all queues in a round-robin; batch to amortize fences
+            for (ProducerNode* p = head_.load(std::memory_order_acquire); p;
+                 p = p->next) {
+                if (!p->active.load(std::memory_order_acquire) &&
+                    p->q.approx_size() == 0) {
+                    continue;
+                }
+                int k = 0;
+                while (k < BATCH_DEQ && p->q.dequeue(rec)) {
+                    format_and_emit(rec);
+                    ++k;
+                    did = true;
+                }
+            }
+            if (!did) {
                 std::this_thread::yield();
             }
         }
-        // Drain on shutdown
-        while (queue_.dequeue(rec)) {
-            format_and_emit(rec);
+
+        // Drain
+        for (auto* p = head_.load(std::memory_order_acquire); 
+            p; p = p->next) {
+            while (p->q.dequeue(rec)) {
+                format_and_emit(rec);
+            }
         }
     }
 
-    queue_t queue_{};
-    std::atomic<bool> done_;
+private:
+    // Global registry of producer queues (intrusive lock-free push-front)
+    static std::atomic<ProducerNode*> head_;
+
+    // Per-thread registration
+    static thread_local TL tls_;
+
+    std::atomic<bool> done_{false};
     std::thread worker_;
 };
 
+inline std::atomic<Logger::ProducerNode*> Logger::head_{nullptr};
+inline thread_local Logger::TL Logger::tls_{};
+
 } // namespace steroidslog
 
-//==============================================================================
+#undef SL_CACHELINE
 
-#define LOG_DEBUG(fmt, ...)                                                    \
+//------------------------------------------------------------------------------
+
+#define SL_CAT_(a, b) a##b
+#define SL_CAT(a, b) SL_CAT_(a, b)
+
+#define STERLOG_DEBUG(fmt, ...)                                                \
     {                                                                          \
         using namespace steroidslog;                                           \
-        constexpr uint32_t _id = fnv1a_32("[DEBUG] " fmt);                     \
-        [[maybe_unused]] static bool _reg = [_id] {                            \
-            pseudomap::get(_id) = std::string_view("[DEBUG] " fmt);            \
+        constexpr uint32_t SL_CAT(_id_, __LINE__) = fnv1a_32("[DEBUG] " fmt);  \
+        [[maybe_unused]] static bool SL_CAT(_reg_, __LINE__) = [] {            \
+            pseudomap::get(SL_CAT(_id_, __LINE__)) =                           \
+                std::string_view("[DEBUG] " fmt);                              \
             return true;                                                       \
         }();                                                                   \
-        Logger::instance().enqueue<_id>(__VA_ARGS__);                          \
+        Logger::instance().enqueue<SL_CAT(_id_, __LINE__)>(__VA_ARGS__);       \
     }
 
-#define LOG_INFO(fmt, ...)                                                     \
+#define STERLOG_INFO(fmt, ...)                                                 \
     {                                                                          \
         using namespace steroidslog;                                           \
-        constexpr uint32_t _id = fnv1a_32("[INFO] " fmt);                      \
-        [[maybe_unused]] static bool _reg = [_id] {                            \
-            pseudomap::get(_id) = std::string_view("[INFO] " fmt);             \
+        constexpr uint32_t SL_CAT(_id_, __LINE__) = fnv1a_32("[INFO] " fmt);   \
+        [[maybe_unused]] static bool SL_CAT(_reg_, __LINE__) = [] {            \
+            pseudomap::get(SL_CAT(_id_, __LINE__)) =                           \
+                std::string_view("[INFO] " fmt);                               \
             return true;                                                       \
         }();                                                                   \
-        Logger::instance().enqueue<_id>(__VA_ARGS__);                          \
+        Logger::instance().enqueue<SL_CAT(_id_, __LINE__)>(__VA_ARGS__);       \
     }
 
-#define LOG_WARN(fmt, ...)                                                     \
+#define STERLOG_WARN(fmt, ...)                                                 \
     {                                                                          \
         using namespace steroidslog;                                           \
-        constexpr uint32_t _id = fnv1a_32("[WARNING] " fmt);                   \
-        [[maybe_unused]] static bool _reg = [_id] {                            \
-            pseudomap::get(_id) = std::string_view("[WARNING] " fmt);          \
+        constexpr uint32_t SL_CAT(_id_, __LINE__) =                            \
+            fnv1a_32("[WARNING] " fmt);                                        \
+        [[maybe_unused]] static bool SL_CAT(_reg_, __LINE__) = [] {            \
+            pseudomap::get(SL_CAT(_id_, __LINE__)) =                           \
+                std::string_view("[WARNING] " fmt);                            \
             return true;                                                       \
         }();                                                                   \
-        Logger::instance().enqueue<_id>(__VA_ARGS__);                          \
+        Logger::instance().enqueue<SL_CAT(_id_, __LINE__)>(__VA_ARGS__);       \
     }
 
-#define LOG_ERROR(fmt, ...)                                                    \
+#define STERLOG_ERROR(fmt, ...)                                                \
     {                                                                          \
         using namespace steroidslog;                                           \
-        constexpr uint32_t _id = fnv1a_32("[ERROR] " fmt);                     \
-        [[maybe_unused]] static bool _reg = [_id] {                            \
-            pseudomap::get(_id) = std::string_view("[ERROR] " fmt);            \
+        constexpr uint32_t SL_CAT(_id_, __LINE__) = fnv1a_32("[ERROR] " fmt);  \
+        [[maybe_unused]] static bool SL_CAT(_reg_, __LINE__) = [] {            \
+            pseudomap::get(SL_CAT(_id_, __LINE__)) =                           \
+                std::string_view("[ERROR] " fmt);                              \
             return true;                                                       \
         }();                                                                   \
-        Logger::instance().enqueue<_id>(__VA_ARGS__);                          \
+        Logger::instance().enqueue<SL_CAT(_id_, __LINE__)>(__VA_ARGS__);       \
     }

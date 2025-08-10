@@ -7,73 +7,114 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
+#include <new>
 #include <type_traits>
 #include <utility>
 
+#define SL_CACHELINE 64
+
 namespace steroidslog {
 
-template <typename T, size_t ReqCap>
+template <typename T, std::size_t ReqCap>
 class spsc_bounded_queue {
+    static_assert(ReqCap >= 2, "Capacity must be >= 2");
     static_assert((ReqCap & (ReqCap - 1)) == 0,
                   "Capacity must be power of two");
 
+    static constexpr std::size_t Capacity = ReqCap;
+    static constexpr std::size_t Mask = Capacity - 1;
+
 public:
     spsc_bounded_queue() noexcept
-        : head_(0), tail_(0), head_cache_(0), tail_cache_(0)
-    {}
+        : head_(0), tail_(0), head_cache_(0), tail_cache_(0) {}
 
-    bool enqueue(const T& item) noexcept {
-        const size_t tail = tail_.load(std::memory_order_relaxed);
-        const size_t next_tail = (tail + 1) & Mask;
-        // Refill head cache only on potential full
-        if (next_tail == head_cache_) {
-            head_cache_ = head_.load(std::memory_order_acquire);
-            if (next_tail == head_cache_)
-                return false;
-        }
-        buffer_[tail] = item;
-        tail_.store(next_tail, std::memory_order_release);
-        return true;
-    }
+    spsc_bounded_queue(spsc_bounded_queue&&) = delete;
+    spsc_bounded_queue& operator=(spsc_bounded_queue&&) = delete;
+    ~spsc_bounded_queue() { clear(); }
 
-    bool enqueue(T&& item) noexcept {
-        const size_t tail = tail_.load(std::memory_order_relaxed);
-        const size_t next_tail = (tail + 1) & Mask;
-        if (next_tail == head_cache_) {
+    spsc_bounded_queue(const spsc_bounded_queue&) = delete;
+    spsc_bounded_queue& operator=(const spsc_bounded_queue&) = delete;
+
+    bool enqueue(const T& item) noexcept { return emplace_impl(item); }
+
+    bool enqueue(T&& item) noexcept { return emplace_impl(std::move(item)); }
+
+    template <class... Args>
+    bool emplace(Args&&... args) noexcept {
+        const std::size_t tail = tail_.load(std::memory_order_relaxed);
+        const std::size_t next = (tail + 1) & Mask;
+
+        if (next == head_cache_) {
             head_cache_ = head_.load(std::memory_order_acquire);
-            if (next_tail == head_cache_)
-                return false;
+            if (next == head_cache_) {
+                return false; // full
+            }
         }
-        buffer_[tail] = std::move(item);
-        tail_.store(next_tail, std::memory_order_release);
+
+        ::new (static_cast<void*>(std::addressof(buf_[tail])))
+            T(std::forward<Args>(args)...);
+        tail_.store(next, std::memory_order_release);
         return true;
     }
 
     bool dequeue(T& out) noexcept {
-        const size_t head = head_.load(std::memory_order_relaxed);
+        const std::size_t head = head_.load(std::memory_order_relaxed);
         if (head == tail_cache_) {
             tail_cache_ = tail_.load(std::memory_order_acquire);
-            if (head == tail_cache_)
-                return false;
+            if (head == tail_cache_) {
+                return false; // empty
+            }
         }
-        out = std::move(buffer_[head]);
+
+        T* ptr = std::launder(reinterpret_cast<T*>(std::addressof(buf_[head])));
+        out = std::move(*ptr);
+        ptr->~T();
+
         head_.store((head + 1) & Mask, std::memory_order_release);
         return true;
     }
 
-    bool empty() const noexcept {
-        return head_.load(std::memory_order_relaxed) ==
-               tail_.load(std::memory_order_relaxed);
+    void clear() noexcept {
+        T tmp;
+        while (dequeue(tmp)) {}
+    }
+
+    // size() is only approximate under concurrency, but handy for drain.
+    std::size_t approx_size() const noexcept {
+        const std::size_t h = head_.load(std::memory_order_acquire);
+        const std::size_t t = tail_.load(std::memory_order_acquire);
+        return (t + Capacity - h) & Mask;
     }
 
 private:
-    static constexpr size_t Capacity = ReqCap;
-    static constexpr size_t Mask = Capacity - 1;
-    static constexpr size_t CACHE_LINE_SIZE = 64;
+    template <class U>
+    bool emplace_impl(U&& v) noexcept {
+        const std::size_t tail = tail_.load(std::memory_order_relaxed);
+        const std::size_t next = (tail + 1) & Mask;
 
-    alignas(CACHE_LINE_SIZE) T buffer_[Capacity];
-    alignas(CACHE_LINE_SIZE) std::atomic<size_t> head_, tail_;
-    size_t head_cache_, tail_cache_;
+        if (next == head_cache_) {
+            head_cache_ = head_.load(std::memory_order_acquire);
+            if (next == head_cache_) {
+                return false;
+            }
+        }
+
+        ::new (static_cast<void*>(std::addressof(buf_[tail])))
+            T(std::forward<U>(v));
+        tail_.store(next, std::memory_order_release);
+        return true;
+    }
+
+    alignas(SL_CACHELINE) std::atomic<std::size_t> head_;
+    alignas(SL_CACHELINE) std::atomic<std::size_t> tail_;
+    alignas(SL_CACHELINE) std::size_t head_cache_;
+    alignas(SL_CACHELINE) std::size_t tail_cache_;
+
+    using Storage = std::aligned_storage_t<sizeof(T), alignof(T)>;
+    alignas(SL_CACHELINE) Storage buf_[Capacity];
 };
 
 } // namespace steroidslog
+
+#undef SL_CACHELINE

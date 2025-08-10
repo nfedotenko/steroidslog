@@ -8,21 +8,21 @@
 #include <thread>
 
 int main(int /*argc*/, char** /*argv*/) {
-    LOG_INFO("Program start");
+    STERLOG_INFO("Program start");
     std::thread t([&] {
         for (int i = 0; i < 100; ++i) {
-            LOG_DEBUG("worker iteration {}", i);
+            STERLOG_DEBUG("worker iteration {}", i);
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     });
 
     for (int i = 0; i < 50; ++i) {
-        LOG_INFO("main loop {}", i);
+        STERLOG_INFO("main loop {}", i);
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
     t.join();
-    LOG_WARN("Shutting down...");
+    STERLOG_WARN("Shutting down...");
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     return 0;
 }

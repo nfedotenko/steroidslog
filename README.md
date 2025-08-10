@@ -3,8 +3,9 @@
 WIP
 
 TODO
-1. Pre-compile format strings
-2. Add compile-time log-level filtering
+1. Add compile-time log-level filtering
+2. Add timestamp
+3. Add different std::ostream
 
 ---
 

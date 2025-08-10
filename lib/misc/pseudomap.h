@@ -5,78 +5,113 @@
 
 #pragma once
 
-#include <array>
-#include <memory>
-#include <unordered_map>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <string_view>
 #include <utility>
-
-/** Inspired by: https://github.com/hogliux/semimap */
 
 namespace steroidslog {
 
-template <typename, typename, bool>
-struct default_tag {};
-
-template <typename Key, typename Value,
-          typename Tag = default_tag<Key, Value, true>>
-class static_map {
-public:
-    static_map() = delete;
-
-    template <typename... Args>
-    static Value& get(const Key& key, Args&&... args) {
-        auto it = runtime_map.find(key);
-
-        if (it != runtime_map.end()) {
-            return *it->second;
-        }
-
-        return *runtime_map.emplace_hint(it, key,
-                u_ptr(new Value(std::forward<Args>(args)...),{nullptr}))->second;
+// constexpr FNV-1a (32-bit) for compile-time ids
+constexpr uint32_t fnv1a_32_constexpr(std::string_view s) noexcept {
+    uint32_t h = 2166136261u;
+    for (char c : s) {
+        h ^= static_cast<unsigned char>(c);
+        h *= 16777619u;
     }
+    return h;
+}
 
-private:
-    struct value_deleter {
-        bool* i_flag = nullptr;
+template <std::size_t N>
+constexpr uint32_t fnv1a_32(const char (&s)[N]) noexcept {
+    // strip trailing '\0'
+    return fnv1a_32_constexpr(std::string_view{s, N - 1});
+}
 
-        void operator()(Value* v) {
-            if (i_flag != nullptr) {
-                v->~Value();
-                *i_flag = false;
-            } else {
-                delete v;
-            }
-        }
-    };
+//------------------------------------------------------------------------------
+// Ultra-light lock-free open-addressed table keyed by uint32_t id.
+// Single writer per id (via function-local static in macros), many lock-free
+// readers. Stores pointer to a static string (format literal); no ownership.
+//------------------------------------------------------------------------------
+namespace pseudomap_detail {
+static constexpr std::size_t CAP = 1u << 16;
+static constexpr std::size_t MASK = CAP - 1;
 
-    using u_ptr = std::unique_ptr<Value, value_deleter>;
-
-    template <typename> alignas(Value) static char storage[sizeof(Value)];
-    template <typename> static bool init_flag;
-    static std::unordered_map<Key, std::unique_ptr<Value, value_deleter>>
-        runtime_map;
+struct Slot {
+    std::atomic<uint32_t> key{ 0 }; // 0 = empty, else = id
+    std::atomic<const char*> ptr{ nullptr };
 };
 
-template <typename Key, typename Value, typename Tag>
-std::unordered_map<Key, typename static_map<Key, Value, Tag>::u_ptr>
-    static_map<Key, Value, Tag>::runtime_map;
-
-template <typename Key, typename Value, typename Tag>
-template <typename>
-alignas(Value) char static_map<Key, Value, Tag>::storage[sizeof(Value)];
-
-template <typename Key, typename Value, typename Tag>
-template <typename>
-bool static_map<Key, Value, Tag>::init_flag = false;
-
-//==============================================================================
-
-using pseudomap = static_map<uint32_t, std::string_view>;
-
-constexpr uint32_t fnv1a_32(const char* s, uint32_t v = 2166136261u) noexcept {
-    return (*s == '\0')
-            ? v
-            : fnv1a_32(s + 1, (v ^ static_cast<uint8_t>(*s)) * 16777619u);
+inline Slot& slot(std::size_t i) {
+    static Slot table[CAP];
+    return table[i];
 }
+
+inline std::size_t index(uint32_t id, std::size_t probe) {
+    // Linear probe
+    return (static_cast<std::size_t>(id) + probe) & MASK;
+}
+
+inline void put(uint32_t id, std::string_view sv) {
+    const char* p = sv.data();
+    std::size_t probe = 0;
+    for (;;) {
+        Slot& s = slot(index(id, probe++));
+        uint32_t expected = 0;
+        if (s.key.compare_exchange_strong(expected, id,
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_relaxed)) {
+            s.ptr.store(p, std::memory_order_release);
+            return;
+        }
+        if (expected == id) {
+            // already present; ensure ptr is set
+            const char* nullp = nullptr;
+            (void)s.ptr.compare_exchange_strong(
+                nullp, p, std::memory_order_acq_rel, std::memory_order_relaxed);
+            return;
+        }
+        // else collision; keep probing
+    }
+}
+
+inline std::string_view get_view(uint32_t id) {
+    std::size_t probe = 0;
+    for (;;) {
+        Slot& s = slot(index(id, probe++));
+        const uint32_t k = s.key.load(std::memory_order_acquire);
+        if (k == 0) {
+            break; // empty slot -> not found
+        }
+        if (k == id) {
+            const char* p = s.ptr.load(std::memory_order_acquire);
+            return p ? std::string_view{p} : std::string_view{};
+        }
+    }
+    return {};
+}
+} // namespace pseudomap_detail
+
+// Returned proxy allows both "assignment to register" and "implicit read".
+struct PseudoRef {
+    uint32_t id;
+
+    PseudoRef& operator=(std::string_view sv) noexcept {
+        pseudomap_detail::put(id, sv);
+        return *this;
+    }
+
+    explicit operator std::string_view() const noexcept {
+        return pseudomap_detail::get_view(id);
+    }
+};
+
+namespace pseudomap {
+
+// Public API
+inline PseudoRef get(uint32_t id) noexcept { return PseudoRef{ id }; }
+
+} // namespace pseudomap
 
 } // namespace steroidslog

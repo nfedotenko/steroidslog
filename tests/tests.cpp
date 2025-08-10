@@ -28,8 +28,8 @@ TEST(LoggerTests, SingleThreadFormatting) {
     CoutCapture capture;
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-    LOG_INFO("Test {}", 42);
-    LOG_DEBUG("Hello {}", std::string("world"));
+    STERLOG_INFO("Test {}", 42);
+    STERLOG_DEBUG("Hello {}", std::string("world"));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     auto out = capture.capture.str();
@@ -45,13 +45,13 @@ TEST(LoggerTests, MultiThreadInterleaving) {
     CoutCapture capture;
     std::thread t([&] {
         for (int i = 0; i < 5; ++i) {
-            LOG_DEBUG("T{}", i);
+            STERLOG_DEBUG("T{}", i);
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     });
 
     for (int i = 0; i < 5; ++i) {
-        LOG_INFO("M{}", i);
+        STERLOG_INFO("M{}", i);
         std::this_thread::sleep_for(std::chrono::milliseconds(7));
     }
     t.join();
@@ -69,7 +69,7 @@ TEST(LoggerTests, ShutdownFlushesQueue) {
     CoutCapture capture;
     auto& log = Logger::instance();
 
-    LOG_INFO("Before shutdown");
+    STERLOG_INFO("Before shutdown");
     log.shutdown();
 
     auto out = capture.capture.str();
