@@ -256,7 +256,7 @@ inline void log_complex(int a, int b, double d) {
 enum class Backend { Steroidslog, Spdlog, Quill, Fmtlog };
 
 template <Backend B>
-static void init(bool to_file) {
+void init(bool to_file) {
     if constexpr (B == Backend::Steroidslog) {
         steroidslog_adapter::init(to_file, "steroids.log");
     } else if constexpr (B == Backend::Spdlog) {
@@ -271,7 +271,7 @@ static void init(bool to_file) {
 }
 
 template <Backend B>
-static void log_static() {
+void log_static() {
     if constexpr (B == Backend::Steroidslog) {
         steroidslog_adapter::log_static();
     } else if constexpr (B == Backend::Spdlog) {
@@ -286,7 +286,7 @@ static void log_static() {
 }
 
 template <Backend B>
-static void log_string_concat(std::string_view s) {
+void log_string_concat(std::string_view s) {
     if constexpr (B == Backend::Steroidslog) {
         steroidslog_adapter::log_string_concat(s);
     } else if constexpr (B == Backend::Spdlog) {
@@ -301,7 +301,7 @@ static void log_string_concat(std::string_view s) {
 }
 
 template <Backend B>
-static void log_single_int(int a) {
+void log_single_int(int a) {
     if constexpr (B == Backend::Steroidslog) {
         steroidslog_adapter::log_single_int(a);
     } else if constexpr (B == Backend::Spdlog) {
@@ -316,7 +316,7 @@ static void log_single_int(int a) {
 }
 
 template <Backend B>
-static void log_two_ints(int a, int b) {
+void log_two_ints(int a, int b) {
     if constexpr (B == Backend::Steroidslog) {
         steroidslog_adapter::log_two_ints(a, b);
     } else if constexpr (B == Backend::Spdlog) {
@@ -331,7 +331,7 @@ static void log_two_ints(int a, int b) {
 }
 
 template <Backend B>
-static void log_single_double(double x) {
+void log_single_double(double x) {
     if constexpr (B == Backend::Steroidslog) {
         steroidslog_adapter::log_single_double(x);
     } else if constexpr (B == Backend::Spdlog) {
@@ -346,7 +346,7 @@ static void log_single_double(double x) {
 }
 
 template <Backend B>
-static void log_complex(int a, int b, double d) {
+void log_complex(int a, int b, double d) {
     if constexpr (B == Backend::Steroidslog) {
         steroidslog_adapter::log_complex(a, b, d);
     } else if constexpr (B == Backend::Spdlog) {

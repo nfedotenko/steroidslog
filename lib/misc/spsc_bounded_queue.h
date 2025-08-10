@@ -17,11 +17,8 @@
 namespace steroidslog {
 
 template <typename T, std::size_t ReqCap>
+requires(ReqCap >= 2 && (ReqCap & (ReqCap - 1)) == 0)
 class spsc_bounded_queue {
-    static_assert(ReqCap >= 2, "Capacity must be >= 2");
-    static_assert((ReqCap & (ReqCap - 1)) == 0,
-                  "Capacity must be power of two");
-
     static constexpr std::size_t Capacity = ReqCap;
     static constexpr std::size_t Mask = Capacity - 1;
 
@@ -52,7 +49,7 @@ public:
             }
         }
 
-        ::new (static_cast<void*>(std::addressof(buf_[tail])))
+        ::new (static_cast<void*>(buf_[tail].bytes))
             T(std::forward<Args>(args)...);
         tail_.store(next, std::memory_order_release);
         return true;
@@ -67,7 +64,7 @@ public:
             }
         }
 
-        T* ptr = std::launder(reinterpret_cast<T*>(std::addressof(buf_[head])));
+        T* ptr = std::launder(reinterpret_cast<T*>(buf_[head].bytes));
         out = std::move(*ptr);
         ptr->~T();
 
@@ -111,8 +108,10 @@ private:
     alignas(SL_CACHELINE) std::size_t head_cache_;
     alignas(SL_CACHELINE) std::size_t tail_cache_;
 
-    using Storage = std::aligned_storage_t<sizeof(T), alignof(T)>;
-    alignas(SL_CACHELINE) Storage buf_[Capacity];
+    struct Cell {
+        alignas(T) std::byte bytes[sizeof(T)];
+    };
+    Cell buf_[Capacity];
 };
 
 } // namespace steroidslog

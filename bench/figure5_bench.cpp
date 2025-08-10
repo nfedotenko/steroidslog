@@ -109,7 +109,7 @@ static void BM_complexFormat(benchmark::State& st) {
     BENCHMARK_TEMPLATE(BM_singleDouble, backend);                              \
     BENCHMARK_TEMPLATE(BM_complexFormat, backend);
 
-#if 0
+#if 1
 REG(Backend::Steroidslog)
 REG(Backend::Spdlog)
 REG(Backend::Quill)
@@ -127,7 +127,7 @@ REG(Backend::Fmtlog)
 #if 1
 REG_THREADS(Backend::Steroidslog, 4)
 REG_THREADS(Backend::Spdlog, 4)
-REG_THREADS(Backend::Quill, 4)
+//REG_THREADS(Backend::Quill, 4)
 REG_THREADS(Backend::Fmtlog, 4)
 #endif
 
