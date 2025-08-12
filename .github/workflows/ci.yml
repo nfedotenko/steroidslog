@@ -1,0 +1,97 @@
+name: CI (CMake + GTest)
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} • ${{ matrix.compiler }} • ${{ matrix.build_type }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Release]
+        include:
+          - os: ubuntu-latest
+            compiler: gcc
+            c: gcc
+            cxx: g++
+            generator: Ninja
+          - os: ubuntu-latest
+            compiler: clang
+            c: clang
+            cxx: clang++
+            generator: Ninja
+          - os: windows-latest
+            compiler: msvc
+            c: cl
+            cxx: cl
+            generator: Ninja
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # MSVC environment for cl.exe
+      - name: Set up MSVC developer command prompt
+        if: matrix.os == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # Optional: speed up Linux builds with ccache
+      - name: Set up ccache
+        if: startsWith(matrix.os, 'ubuntu')
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: ${{ runner.os }}-${{ matrix.compiler }}-${{ matrix.build_type }}
+
+      # Configure on Linux (with ccache)
+      - name: Configure (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: >
+          cmake -S . -B build
+          -G "${{ matrix.generator }}"
+          -DCMAKE_C_COMPILER=${{ matrix.c }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DBUILD_TESTING=ON
+
+      # Configure on Windows (MSVC)
+      - name: Configure (Windows)
+        if: matrix.os == 'windows-latest'
+        run: >
+          cmake -S . -B build
+          -G "${{ matrix.generator }}"
+          -DCMAKE_C_COMPILER=${{ matrix.c }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DBUILD_TESTING=ON
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }} -j 2
+
+      - name: Run tests (ctest)
+        working-directory: build
+        env:
+          CTEST_OUTPUT_ON_FAILURE: 1
+          GTEST_COLOR: 1
+        run: >
+          ctest --build-config ${{ matrix.build_type }}
+          --output-on-failure -j 2
+          --output-junit "ctest-${{ matrix.os }}-${{ matrix.compiler }}.xml"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-${{ matrix.os }}-${{ matrix.compiler }}-${{ matrix.build_type }}
+          path: build/ctest-*.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: ccache stats
+        if: startsWith(matrix.os, 'ubuntu')
+        run: ccache -s
