@@ -92,7 +92,9 @@ public:
         ProducerNode* node = ensure_tls_node();
 
         RawLogRecord rec{Id, static_cast<uint8_t>(sizeof...(Args)), {}};
-        arg_slot_t tmp[] = {make_argslot(std::forward<Args>(args))...};
+        arg_slot_t tmp[sizeof...(Args)] = {
+            make_argslot(std::forward<Args>(args))...
+        };
         std::memcpy(rec.args, tmp, sizeof(tmp));
 
         // Non-blocking try; drop if full to avoid stalling producers.
