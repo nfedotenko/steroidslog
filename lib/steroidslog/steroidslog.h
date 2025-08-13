@@ -23,6 +23,14 @@
 #include <utility>
 #include <variant>
 
+#if defined(_MSC_VER)
+#define RESTRICT __restrict
+#elif defined(__clang__) || defined(__GNUC__)
+#define RESTRICT __restrict__
+#else
+#define RESTRICT
+#endif
+
 #define SL_CACHELINE 64
 
 namespace steroidslog {
@@ -92,8 +100,13 @@ public:
         ProducerNode* node = ensure_tls_node();
 
         RawLogRecord rec{Id, static_cast<uint8_t>(sizeof...(Args)), {}};
-        arg_slot_t tmp[] = {make_argslot(std::forward<Args>(args))...};
-        std::memcpy(rec.args, tmp, sizeof(tmp));
+
+        if constexpr (sizeof...(Args) > 0) {
+            // arg_slot_t tmp[] = {make_argslot(std::forward<Args>(args))...};
+            // std::memcpy(rec.args, tmp, sizeof(tmp));
+            arg_slot_t* RESTRICT dst = rec.args;
+            ((void)(*dst++ = make_argslot(std::forward<Args>(args))), ...);
+        }
 
         // Non-blocking try; drop if full to avoid stalling producers.
         for (int tries = 0; tries < 4; ++tries) {
