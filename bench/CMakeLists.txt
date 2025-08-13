@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 
 project(steroidslog-benchmark)
 
-add_compile_options(-O3 -DNDEBUG)
+add_compile_options($<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:-march=native>)
 
 set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
 include(${CMAKE_SOURCE_DIR}/cmake/GoogleBenchmark.cmake)

@@ -34,7 +34,7 @@ mkdir -p "$BUILD_DIR" "$OUT_DIR"
 
 ### ──────────────────────────── build ─────────────────────────────────────
 say "Configuring & building in: $BUILD_DIR"
-cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON
+cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DSTEROIDSLOG_BUILD_BENCH=ON -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON
 cmake --build "$BUILD_DIR" -j
 
 # find binary (either at root of build or under subdir)
@@ -71,14 +71,14 @@ else
 
   # Disable turbo: Intel uses intel_pstate no_turbo=1; AMD often exposes cpufreq/boost=0
   vendor="$(LC_ALL=C lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2);print $2}')"
-  if [[ "$vendor" == "GenuineIntel" ]]; then
+  if [[ "$vendor" == *"GenuineIntel"* ]]; then
     if [[ -e /sys/devices/system/cpu/intel_pstate/no_turbo ]]; then
       $pref bash -c 'echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo' && ok "Intel turbo disabled (no_turbo=1)." || warn "Failed to toggle intel_pstate no_turbo."
       # 1 disables turbo per kernel docs
     else
       warn "intel_pstate no_turbo not present."
     fi
-  elif [[ "$vendor" == "AuthenticAMD" ]]; then
+  elif [[ "$vendor" == *"AuthenticAMD"* ]]; then
     if [[ -e /sys/devices/system/cpu/cpufreq/boost ]]; then
       $pref bash -c 'echo 0 > /sys/devices/system/cpu/cpufreq/boost' && ok "AMD boost disabled (boost=0)." || warn "Failed to toggle cpufreq boost."
       # cpufreq boost sysfs
