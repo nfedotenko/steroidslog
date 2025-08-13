@@ -1,20 +1,24 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.22)
 
 project(steroidslog-tests)
 
+# CRT consistency for MSVC
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+
 include(${CMAKE_SOURCE_DIR}/cmake/GoogleTest.cmake)
 
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 
-set(CMAKE_CXX_FLAGS
-    "${CMAKE_CXX_FLAGS} -Wall -Wextra -ftrapv"
-)
-
-include_directories(${CMAKE_SOURCE_DIR}/lib)
-
-add_executable(${PROJECT_NAME} tests.cpp)
+add_executable(${PROJECT_NAME} ${TEST_SOURCES})
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
-    gtest gtest_main steroidslog
-)
+    steroidslog
+    GTest::gtest_main)
+
+target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_20)
+
+# Let CTest discover individual TEST() cases at build time
+include(GoogleTest)
+gtest_discover_tests(${PROJECT_NAME}
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    DISCOVERY_TIMEOUT 60)

@@ -39,7 +39,7 @@ jobs:
         if: matrix.os == 'windows-latest'
         uses: ilammy/msvc-dev-cmd@v1
 
-      # Optional: speed up Linux builds with ccache
+      # Speed up Linux builds with ccache
       - name: Set up ccache
         if: startsWith(matrix.os, 'ubuntu')
         uses: hendrikmuhs/ccache-action@v1

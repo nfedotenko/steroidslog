@@ -1,24 +1,28 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.22)
 
 project(steroidslog)
 
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+file(GLOB_RECURSE STEROIDSLOG_SRC CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/steroidslog/*.cpp")
 
-set(CMAKE_CXX_FLAGS 
-    "${CMAKE_CXX_FLAGS} -Wall -Wextra -fPIC"
-)
+if(STEROIDSLOG_SRC)
+    add_library(${PROJECT_NAME} STATIC ${STEROIDSLOG_SRC})
 
-file(GLOB_RECURSE LIB_HEADERS
-    misc/*.h
-    steroidslog/*.h
-)
+    target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_SOURCE_DIR}/lib)
+else() # single header
+    add_library(${PROJECT_NAME} INTERFACE)
 
-file(GLOB_RECURSE LIB_SOURCES
-    misc/*.cpp
-    steroidslog/*.cpp
-)
+    target_include_directories(${PROJECT_NAME} PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/lib>
+        $<INSTALL_INTERFACE:lib>)
+endif()
 
-add_library(${PROJECT_NAME} STATIC ${LIB_HEADERS} ${LIB_SOURCES})
+set(_warn_msvc "/W4;/permissive-;/EHsc;/utf-8")
+set(_warn_gcc_clang "-Wall;-Wextra;-Wpedantic")
 
-target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_SOURCE_DIR}/lib)
+target_compile_options(${PROJECT_NAME} PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:${_warn_msvc}>
+    $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:${_warn_gcc_clang}>)
+
+target_compile_definitions(${PROJECT_NAME} PUBLIC
+    $<$<PLATFORM_ID:Windows>:WIN32_LEAN_AND_MEAN;NOMINMAX>)
