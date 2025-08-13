@@ -95,3 +95,65 @@ jobs:
       - name: ccache stats
         if: startsWith(matrix.os, 'ubuntu')
         run: ccache -s
+
+  sanitize:
+    name: Sanitizers • ${{ matrix.compiler }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: clang
+            c: clang
+            cxx: clang++
+          - compiler: gcc
+            c: gcc
+            cxx: g++
+    steps:
+      - uses: actions/checkout@v4
+
+      # Optional cache to prevent mixing with non-sanitized builds
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: ${{ runner.os }}-sanitize-${{ matrix.compiler }}
+
+      - name: Configure (ASan+UBSan)
+        run: >
+          cmake -S . -B build-sanitize
+          -G "Ninja"
+          -DCMAKE_C_COMPILER=${{ matrix.c }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DBUILD_TESTING=ON
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          # Compile & link flags for sanitizers:
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g -fno-lto"
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g -fno-lto"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-lto"
+          -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-lto"
+
+      - name: Build (sanitized)
+        run: cmake --build build-sanitize -j 2
+
+      - name: Run tests (ASan/UBSan)
+        working-directory: build-sanitize
+        env:
+          # Helpful diagnostics for sanitizers:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          CTEST_OUTPUT_ON_FAILURE: 1
+          GTEST_COLOR: 1
+        run: >
+          ctest --output-on-failure
+          --output-junit "ctest-sanitize-${{ matrix.compiler }}.xml"
+
+      - name: Upload sanitizer test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-sanitize-${{ matrix.compiler }}
+          path: build-sanitize/ctest-sanitize-*.xml
+          if-no-files-found: ignore
+          retention-days: 14
