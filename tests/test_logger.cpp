@@ -123,7 +123,7 @@ TEST(Logger, SingleThreadFormatting) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     STERLOG_INFO("Test {}", 42);
-    STERLOG_DEBUG("Hello {}", std::string("world"));
+    STERLOG_DEBUG("Hello {}", "world");
     STERLOG_WARN("Number: {}", 1.234f);
     STERLOG_ERROR("Some big and scary error message...");
 
