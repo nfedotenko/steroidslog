@@ -24,14 +24,14 @@
 #include <variant>
 
 #if defined(_MSC_VER)
-#define RESTRICT __restrict
+#define STERLOG_RESTRICT __restrict
 #elif defined(__clang__) || defined(__GNUC__)
-#define RESTRICT __restrict__
+#define STERLOG_RESTRICT __restrict__
 #else
-#define RESTRICT
+#define STERLOG_RESTRICT
 #endif
 
-#define SL_CACHELINE 64
+#define STERLOG_CACHELINE 64
 
 namespace steroidslog {
 
@@ -74,8 +74,8 @@ class Logger {
     using queue_t = spsc_bounded_queue<RawLogRecord, QUEUE_CAP>;
 
     struct ProducerNode {
-        alignas(SL_CACHELINE) queue_t q;
-        alignas(SL_CACHELINE) std::atomic<bool> active{true};
+        alignas(STERLOG_CACHELINE) queue_t q;
+        alignas(STERLOG_CACHELINE) std::atomic<bool> active{true};
         ProducerNode* next{nullptr};
     };
 
@@ -104,7 +104,7 @@ public:
         if constexpr (sizeof...(Args) > 0) {
             // arg_slot_t tmp[] = {make_argslot(std::forward<Args>(args))...};
             // std::memcpy(rec.args, tmp, sizeof(tmp));
-            arg_slot_t* RESTRICT dst = rec.args;
+            arg_slot_t* STERLOG_RESTRICT dst = rec.args;
             ((void)(*dst++ = make_argslot(std::forward<Args>(args))), ...);
         }
 
@@ -267,7 +267,8 @@ inline thread_local Logger::TL Logger::tls_{};
 
 } // namespace steroidslog
 
-#undef SL_CACHELINE
+#undef STERLOG_RESTRICT
+#undef STERLOG_CACHELINE
 
 //------------------------------------------------------------------------------
 

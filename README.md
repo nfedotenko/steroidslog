@@ -103,7 +103,8 @@ cmake --build build/bench -j
 
 ### Use in another project (CMake)
 
-**Option A — FetchContent**
+#### Option A — `FetchContent`
+
 ```cmake
 include(FetchContent)
 FetchContent_Declare(
@@ -115,14 +116,19 @@ FetchContent_MakeAvailable(steroidslog)
 target_link_libraries(your_app PRIVATE steroidslog)
 ```
 
-**Option B — add_subdirectory**
+#### Option B — `add_subdirectory`
+
 ```cmake
 add_subdirectory(externals/steroidslog) # path you cloned to
 target_link_libraries(your_app PRIVATE steroidslog)
 ```
 
-**Option C — Single header (coming soon)**
-Copy `steroidslog.h` into your project and include it directly. This is ideal for quick experiments and minimal dependencies. (For best performance, prefer the full build which enables LTO and per-target optimization flags.)
+#### Option C — Single header *(coming soon)*
+
+Copy `steroidslog.h` into your project and include it directly. This is ideal for quick experiments and minimal dependencies.
+
+> [!TIP]
+> For best performance, prefer the full build which enables LTO and per-target optimization flags.
 
 ## Supported platforms
 
@@ -138,6 +144,7 @@ Copy `steroidslog.h` into your project and include it directly. This is ideal fo
   - [ ] Colored log
   - [ ] Blocking enqueue
   - [ ] Single‑threaded mode
+  - [ ] Complex formatter (stuff like `{:.3f}`)
 - [ ] Small hot‑path tweaks
 - [ ] Single-header version
 

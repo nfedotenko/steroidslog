@@ -3,11 +3,11 @@
  * Distributed under the MIT License (http://opensource.org/licenses/MIT)
  */
 
-#include "steroidslog/steroidslog.h"
+#include <steroidslog/steroidslog.h>
 
 #include <thread>
 
-int main(int /*argc*/, char** /*argv*/) {
+int main() {
     STERLOG_INFO("Program start");
     std::thread t([&] {
         for (int i = 0; i < 100; ++i) {
