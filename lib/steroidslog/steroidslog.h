@@ -62,15 +62,23 @@ constexpr arg_slot_t make_argslot(T&& v) {
     }
 }
 
-struct RawLogRecord {
+struct RawLogRecord final {
     uint32_t fmt_id;   // compile-time hash
     uint8_t arg_count; // <= MAX_ARGS
     arg_slot_t args[MAX_ARGS];
 };
 
+enum class LogLevel : uint8_t {
+    Debug,
+    Info,
+    Warning,
+    Error,
+    Unknown
+};
+
 //------------------------------------------------------------------------------
 
-class Logger {
+class Logger final {
     using queue_t = spsc_bounded_queue<RawLogRecord, QUEUE_CAP>;
 
     struct ProducerNode {
@@ -272,54 +280,42 @@ inline thread_local Logger::TL Logger::tls_{};
 
 //------------------------------------------------------------------------------
 
-#define SL_CAT_(a, b) a##b
-#define SL_CAT(a, b) SL_CAT_(a, b)
+#ifndef SL_CAT
+#define SL_CAT_IMPL(a, b) a##b
+#define SL_CAT(a, b) SL_CAT_IMPL(a, b)
+#endif
+
+#define SL_LEVEL_PREFIX_Debug   "[DEBUG] "
+#define SL_LEVEL_PREFIX_Info    "[INFO] "
+#define SL_LEVEL_PREFIX_Warning "[WARNING] "
+#define SL_LEVEL_PREFIX_Error   "[ERROR] "
+#define SL_LEVEL_PREFIX(level) SL_CAT(SL_LEVEL_PREFIX_, level)
+
+#ifndef STEROIDSLOG_MIN_LEVEL
+#define STEROIDSLOG_MIN_LEVEL Debug
+#endif
+
+#define STERLOG(level, fmt, ...)                                               \
+    {                                                                          \
+        using namespace steroidslog;                                           \
+        if constexpr (LogLevel::level >= LogLevel::STEROIDSLOG_MIN_LEVEL) {    \
+            constexpr uint32_t SL_CAT(_id_, __LINE__) =                        \
+                fnv1a_32(SL_LEVEL_PREFIX(level) fmt);                          \
+            [[maybe_unused]] static bool SL_CAT(_reg_,                         \
+                                                __LINE__) = []() constexpr {   \
+                pseudomap::get(SL_CAT(_id_, __LINE__)) =                       \
+                    std::string_view(SL_LEVEL_PREFIX(level) fmt);              \
+                return true;                                                   \
+            }();                                                               \
+            Logger::instance().enqueue<SL_CAT(_id_, __LINE__)>(__VA_ARGS__);   \
+        }                                                                      \
+    }
 
 #define STERLOG_DEBUG(fmt, ...)                                                \
-    {                                                                          \
-        using namespace steroidslog;                                           \
-        constexpr uint32_t SL_CAT(_id_, __LINE__) = fnv1a_32("[DEBUG] " fmt);  \
-        [[maybe_unused]] static bool SL_CAT(_reg_, __LINE__) = [] {            \
-            pseudomap::get(SL_CAT(_id_, __LINE__)) =                           \
-                std::string_view("[DEBUG] " fmt);                              \
-            return true;                                                       \
-        }();                                                                   \
-        Logger::instance().enqueue<SL_CAT(_id_, __LINE__)>(__VA_ARGS__);       \
-    }
-
+    STERLOG(Debug, fmt __VA_OPT__(, ) __VA_ARGS__)
 #define STERLOG_INFO(fmt, ...)                                                 \
-    {                                                                          \
-        using namespace steroidslog;                                           \
-        constexpr uint32_t SL_CAT(_id_, __LINE__) = fnv1a_32("[INFO] " fmt);   \
-        [[maybe_unused]] static bool SL_CAT(_reg_, __LINE__) = [] {            \
-            pseudomap::get(SL_CAT(_id_, __LINE__)) =                           \
-                std::string_view("[INFO] " fmt);                               \
-            return true;                                                       \
-        }();                                                                   \
-        Logger::instance().enqueue<SL_CAT(_id_, __LINE__)>(__VA_ARGS__);       \
-    }
-
+    STERLOG(Info, fmt __VA_OPT__(, ) __VA_ARGS__)
 #define STERLOG_WARN(fmt, ...)                                                 \
-    {                                                                          \
-        using namespace steroidslog;                                           \
-        constexpr uint32_t SL_CAT(_id_, __LINE__) =                            \
-            fnv1a_32("[WARNING] " fmt);                                        \
-        [[maybe_unused]] static bool SL_CAT(_reg_, __LINE__) = [] {            \
-            pseudomap::get(SL_CAT(_id_, __LINE__)) =                           \
-                std::string_view("[WARNING] " fmt);                            \
-            return true;                                                       \
-        }();                                                                   \
-        Logger::instance().enqueue<SL_CAT(_id_, __LINE__)>(__VA_ARGS__);       \
-    }
-
+    STERLOG(Warning, fmt __VA_OPT__(, ) __VA_ARGS__)
 #define STERLOG_ERROR(fmt, ...)                                                \
-    {                                                                          \
-        using namespace steroidslog;                                           \
-        constexpr uint32_t SL_CAT(_id_, __LINE__) = fnv1a_32("[ERROR] " fmt);  \
-        [[maybe_unused]] static bool SL_CAT(_reg_, __LINE__) = [] {            \
-            pseudomap::get(SL_CAT(_id_, __LINE__)) =                           \
-                std::string_view("[ERROR] " fmt);                              \
-            return true;                                                       \
-        }();                                                                   \
-        Logger::instance().enqueue<SL_CAT(_id_, __LINE__)>(__VA_ARGS__);       \
-    }
+    STERLOG(Error, fmt __VA_OPT__(, ) __VA_ARGS__)

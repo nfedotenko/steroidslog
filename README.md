@@ -137,7 +137,7 @@ Copy `steroidslog.h` into your project and include it directly. This is ideal fo
 
 ## Roadmap / TODO
 
-- [ ] Compile‑time log‑level filtering
+- [x] Compile‑time log‑level filtering
 - [ ] Timestamp
 - [ ] Different `std::ostream` targets
 - [ ] Customizations:
