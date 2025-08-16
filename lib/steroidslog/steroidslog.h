@@ -301,8 +301,7 @@ inline thread_local Logger::TL Logger::tls_{};
         if constexpr (LogLevel::level >= LogLevel::STEROIDSLOG_MIN_LEVEL) {    \
             constexpr uint32_t SL_CAT(_id_, __LINE__) =                        \
                 fnv1a_32(SL_LEVEL_PREFIX(level) fmt);                          \
-            [[maybe_unused]] static bool SL_CAT(_reg_,                         \
-                                                __LINE__) = []() constexpr {   \
+            [[maybe_unused]] static bool SL_CAT(_reg_, __LINE__) = [] {        \
                 pseudomap::get(SL_CAT(_id_, __LINE__)) =                       \
                     std::string_view(SL_LEVEL_PREFIX(level) fmt);              \
                 return true;                                                   \
