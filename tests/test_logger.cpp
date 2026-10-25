@@ -21,88 +21,36 @@ using namespace steroidslog;
 
 //------------------------------------------------------------------------------
 
-TEST(Logger, MakeArgslotIntegral) {
-    auto a = make_argslot(42);
-    bool ok = false;
-    std::visit(
-        [&](auto v) {
-            using V = std::remove_cvref_t<decltype(v)>;
-            if constexpr (std::is_integral_v<V>) {
-                ok = (static_cast<long long>(v) == 42);
-            }
-        },
-        a);
-    EXPECT_TRUE(ok);
+TEST(Logger, EncodedSizeMatchesLayout) {
+    // tag + 8 payload bytes for numbers
+    EXPECT_EQ(detail::encoded_size(42), 9u);
+    EXPECT_EQ(detail::encoded_size(2.5), 9u);
+    // tag + u32 length + inline bytes for strings
+    EXPECT_EQ(detail::encoded_size("hello"), 1u + 4u + 5u);
+    EXPECT_EQ(detail::encoded_size(std::string(300, 'x')),
+              1u + 4u + MAX_STR_ARG); // truncated to the cap
+    // tag + pointer + length for static strings
+    EXPECT_EQ(detail::encoded_size(static_str{"hello"}), 1u + 8u + 4u);
 }
 
-TEST(Logger, MakeArgslotFloating) {
-    auto a = make_argslot(3.5);
-    bool ok = false;
-    std::visit(
-        [&](auto v) {
-            using V = std::remove_cvref_t<decltype(v)>;
-            if constexpr (std::is_floating_point_v<V>) {
-                ok = (v > 3.49 && v < 3.51);
-            }
-        },
-        a);
-    EXPECT_TRUE(ok);
-}
+TEST(Logger, EncodeArgRoundtrip) {
+    std::byte buf[64];
+    detail::cursor c{buf};
+    encode_arg(c, 7);
+    encode_arg(c, std::string_view{"abc"});
 
-TEST(Logger, MakeArgslotStringView) {
-    constexpr const char* lit = "hello";
-    auto a = make_argslot(lit);
-    bool ok = false;
-    std::visit(
-        [&](auto v) {
-            using V = std::remove_cvref_t<decltype(v)>;
-            if constexpr (std::is_same_v<V, std::string_view>) {
-                ok = (v == "hello");
-            }
-        },
-        a);
-    EXPECT_TRUE(ok);
-}
+    const std::byte* p = buf;
+    EXPECT_EQ(static_cast<ArgTag>(*p), ArgTag::U64);
+    uint64_t v = 0;
+    std::memcpy(&v, p + 1, sizeof(v));
+    EXPECT_EQ(v, 7u);
+    p += 9;
 
-//------------------------------------------------------------------------------
-
-TEST(Logger, RawRecordArgCountAndCopy) {
-    RawLogRecord r{};
-    r.fmt_id = 123;
-    // 3 args
-    auto a0 = make_argslot(7);
-    auto a1 = make_argslot(2.5);
-    auto a2 = make_argslot("x");
-    steroidslog::arg_slot_t temp[3] = {a0, a1, a2};
-    r.arg_count = 3;
-    std::memcpy(r.args, temp, sizeof(temp));
-    // Verify "types" and values
-    bool ok_int = false, ok_double = false, ok_sv = false;
-    std::visit(
-        [&](auto v) {
-            if constexpr (std::is_integral_v<std::remove_cvref_t<decltype(v)>>) {
-                ok_int = (static_cast<long long>(v) == 7);
-            }
-        },
-        r.args[0]);
-    std::visit(
-        [&](auto v) {
-            if constexpr (std::is_floating_point_v<
-                              std::remove_cvref_t<decltype(v)>>) {
-                ok_double = (v > 2.49 && v < 2.51);
-            }
-        },
-        r.args[1]);
-    std::visit(
-        [&](auto v) {
-            if constexpr (std::is_same_v<std::remove_cvref_t<decltype(v)>,
-                                         std::string_view>) {
-                ok_sv = (v == "x");
-            }
-        },
-        r.args[2]);
-    EXPECT_EQ(r.arg_count, 3);
-    EXPECT_TRUE(ok_int && ok_double && ok_sv);
+    EXPECT_EQ(static_cast<ArgTag>(*p), ArgTag::Str);
+    uint32_t len = 0;
+    std::memcpy(&len, p + 1, sizeof(len));
+    ASSERT_EQ(len, 3u);
+    EXPECT_EQ(std::memcmp(p + 5, "abc", 3), 0);
 }
 
 //------------------------------------------------------------------------------
@@ -164,6 +112,54 @@ TEST(Logger, MultiThreadInterleaving) {
         EXPECT_NE(out.find("[DEBUG] T" + std::to_string(i)), std::string::npos);
         EXPECT_NE(out.find("[INFO] M" + std::to_string(i)), std::string::npos);
     }
+}
+
+// Strings are copied into the record at the call site: logging a temporary
+// and destroying it before the consumer runs must still print the right
+// bytes. Run under ASan in CI — the old string_view shipping was a
+// use-after-free here.
+TEST(Logger, TemporaryStringsAreCopied) {
+    CoutCapture capture;
+
+    for (int i = 0; i < 64; ++i) {
+        std::string tmp = "tmp-" + std::to_string(i);
+        STERLOG_INFO("value={}", tmp);
+        // Clobber the freed storage to make stale reads visible even
+        // without ASan.
+        tmp.assign(tmp.size(), '#');
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    auto out = capture.capture.str();
+    for (int i = 0; i < 64; ++i) {
+        const std::string expect = "[INFO] value=tmp-" + std::to_string(i);
+        EXPECT_NE(out.find(expect), std::string::npos) << expect;
+    }
+    EXPECT_EQ(out.find('#'), std::string::npos);
+}
+
+TEST(Logger, OversizedStringIsTruncatedNotCorrupted) {
+    CoutCapture capture;
+
+    const std::string big(MAX_STR_ARG + 100, 'z');
+    STERLOG_INFO("big={}", big);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    auto out = capture.capture.str();
+    // The argument is truncated to MAX_STR_ARG and the line to MAX_MSG_LEN;
+    // what survives must be the expected prefix.
+    EXPECT_NE(out.find("[INFO] big=zzzz"), std::string::npos);
+}
+
+TEST(Logger, StaticStrIsShippedByPointer) {
+    CoutCapture capture;
+
+    static constexpr std::string_view kBanner = "static banner";
+    STERLOG_INFO("msg={}", static_str{kBanner});
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    auto out = capture.capture.str();
+    EXPECT_NE(out.find("[INFO] msg=static banner"), std::string::npos);
 }
 
 // Shutdown does not corrupt messages
