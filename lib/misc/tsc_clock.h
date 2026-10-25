@@ -14,6 +14,8 @@
 #include <intrin.h>
 #elif defined(__x86_64__) || defined(__i386__)
 #include <x86intrin.h>
+#elif defined(__APPLE__)
+#include <time.h>
 #endif
 
 namespace steroidslog {
@@ -25,9 +27,13 @@ inline uint64_t rdticks() noexcept {
 #if defined(__x86_64__) || defined(__i386__) ||                               \
     (defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86)))
     return __rdtsc();
+#elif defined(__APPLE__)
+    // cntvct_el0 is unreliable from EL0 on Apple Silicon; this is the
+    // canonical cheap monotonic read there (~20 ns).
+    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 #elif defined(__aarch64__)
     uint64_t v;
-    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+    __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(v)::"memory");
     return v;
 #else
     return static_cast<uint64_t>(
