@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <limits>
+#include <mutex>
 #include <cstring>
 #include <sstream>
 #include <string>
@@ -61,13 +62,44 @@ TEST(Logger, EncodeArgRoundtrip) {
 
 //------------------------------------------------------------------------------
 
-// Utility RAII to capture std::cout
-struct CoutCapture {
-    CoutCapture() : old_buf(std::cout.rdbuf(capture.rdbuf())) {}
-    ~CoutCapture() { std::cout.rdbuf(old_buf); }
-    std::ostringstream capture;
+// Utility RAII to capture std::cout. The consumer thread writes into the
+// captured buffer while tests read it, so the buffer must be synchronized —
+// a plain ostringstream here is a data race under TSan.
+class SyncBuf final : public std::streambuf {
+public:
+    std::string str() const {
+        std::lock_guard<std::mutex> lock(m_);
+        return s_;
+    }
+
+protected:
+    int overflow(int ch) override {
+        if (ch != traits_type::eof()) {
+            std::lock_guard<std::mutex> lock(m_);
+            s_.push_back(static_cast<char>(ch));
+        }
+        return ch;
+    }
+
+    std::streamsize xsputn(const char* p, std::streamsize n) override {
+        std::lock_guard<std::mutex> lock(m_);
+        s_.append(p, static_cast<std::size_t>(n));
+        return n;
+    }
 
 private:
+    mutable std::mutex m_;
+    std::string s_;
+};
+
+struct CoutCapture {
+    CoutCapture() : old_buf(std::cout.rdbuf(&buf)) {}
+    ~CoutCapture() { std::cout.rdbuf(old_buf); }
+
+    std::string str() const { return buf.str(); }
+
+private:
+    SyncBuf buf;
     std::streambuf* old_buf;
 };
 
@@ -82,7 +114,7 @@ TEST(Logger, SingleThreadFormatting) {
     STERLOG_ERROR("Some big and scary error message...");
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    auto out = capture.capture.str();
+    auto out = capture.str();
 
     size_t p1 = out.find("[INFO] Test 42");
     size_t p2 = out.find("[DEBUG] Hello world");
@@ -112,7 +144,7 @@ TEST(Logger, MultiThreadInterleaving) {
     }
     t.join();
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    auto out = capture.capture.str();
+    auto out = capture.str();
 
     for (int i = 0; i < 5; ++i) {
         EXPECT_NE(out.find("[DEBUG] T" + std::to_string(i)), std::string::npos);
@@ -134,7 +166,7 @@ TEST(Logger, IntegerSignednessAndCharTypes) {
     STERLOG_INFO("uchar={}", static_cast<unsigned char>(200));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    auto out = capture.capture.str();
+    auto out = capture.str();
     EXPECT_NE(out.find("[INFO] neg=-1"), std::string::npos);
     EXPECT_NE(out.find("[INFO] min=-9223372036854775808"), std::string::npos);
     EXPECT_NE(out.find("[INFO] umax=18446744073709551615"), std::string::npos);
@@ -158,7 +190,7 @@ TEST(Logger, FloatingPointRendering) {
     STERLOG_INFO("f32={}", 1.234f);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    auto out = capture.capture.str();
+    auto out = capture.str();
     EXPECT_NE(out.find("[INFO] tiny=1e-08"), std::string::npos);
     EXPECT_NE(out.find("[INFO] tenth=0.1\n"), std::string::npos);
     EXPECT_NE(out.find("[INFO] big=123456.789\n"), std::string::npos);
@@ -184,7 +216,7 @@ TEST(Logger, TemporaryStringsAreCopied) {
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    auto out = capture.capture.str();
+    auto out = capture.str();
     for (int i = 0; i < 64; ++i) {
         const std::string expect = "[INFO] value=tmp-" + std::to_string(i);
         EXPECT_NE(out.find(expect), std::string::npos) << expect;
@@ -199,7 +231,7 @@ TEST(Logger, OversizedStringIsTruncatedNotCorrupted) {
     STERLOG_INFO("big={}", big);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    auto out = capture.capture.str();
+    auto out = capture.str();
     // The argument is truncated to MAX_STR_ARG and the line to MAX_MSG_LEN;
     // what survives must be the expected prefix.
     EXPECT_NE(out.find("[INFO] big=zzzz"), std::string::npos);
@@ -212,7 +244,7 @@ TEST(Logger, StaticStrIsShippedByPointer) {
     STERLOG_INFO("msg={}", static_str{kBanner});
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    auto out = capture.capture.str();
+    auto out = capture.str();
     EXPECT_NE(out.find("[INFO] msg=static banner"), std::string::npos);
 }
 
@@ -225,7 +257,7 @@ TEST(Logger, ProducerTimestampsPrefixLines) {
     STERLOG_INFO("stamp two");
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    const auto out = capture.capture.str();
+    const auto out = capture.str();
 
     auto ts_before = [&](std::string_view marker) {
         const std::size_t pos = out.find(marker);
@@ -260,7 +292,7 @@ TEST(Logger, FormatSpecsWork) {
     STERLOG_INFO("str={:>5}", "ab");
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    const auto out = capture.capture.str();
+    const auto out = capture.str();
     EXPECT_NE(out.find("[INFO] hex=0xff pad=    42 prec=3.14"),
               std::string::npos);
     EXPECT_NE(out.find("[INFO] pos: b a"), std::string::npos);
@@ -279,7 +311,7 @@ TEST(Logger, DyingThreadRecordsAreFlushed) {
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    const auto out = capture.capture.str();
+    const auto out = capture.str();
     for (int i = 0; i < 8; ++i) {
         const std::string expect =
             "[INFO] dying-thread-" + std::to_string(i) + " says bye";
@@ -327,7 +359,7 @@ TEST(Logger, DropPolicyCountsAndReports) {
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
     EXPECT_GT(log.dropped_count(), before);
-    EXPECT_NE(capture.capture.str().find("steroidslog: dropped"),
+    EXPECT_NE(capture.str().find("steroidslog: dropped"),
               std::string::npos);
 }
 
@@ -348,7 +380,7 @@ TEST(Logger, BlockPolicyLosesNothing) {
     int lines = 0;
     for (int tries = 0; tries < 60; ++tries) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        const auto out = capture.capture.str();
+        const auto out = capture.str();
         lines = 0;
         for (std::size_t pos = 0;
              (pos = out.find("[INFO] blk#", pos)) != std::string::npos;
@@ -373,6 +405,6 @@ TEST(Logger, ShutdownFlushesQueue) {
     STERLOG_INFO("Before shutdown");
     log.shutdown();
 
-    auto out = capture.capture.str();
+    auto out = capture.str();
     EXPECT_NE(out.find("[INFO] Before shutdown"), std::string::npos);
 }
