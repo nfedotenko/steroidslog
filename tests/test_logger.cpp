@@ -25,6 +25,9 @@ TEST(Logger, EncodedSizeMatchesLayout) {
     // tag + 8 payload bytes for numbers
     EXPECT_EQ(detail::encoded_size(42), 9u);
     EXPECT_EQ(detail::encoded_size(2.5), 9u);
+    // tag + 1 payload byte for bool and char
+    EXPECT_EQ(detail::encoded_size(true), 2u);
+    EXPECT_EQ(detail::encoded_size('x'), 2u);
     // tag + u32 length + inline bytes for strings
     EXPECT_EQ(detail::encoded_size("hello"), 1u + 4u + 5u);
     EXPECT_EQ(detail::encoded_size(std::string(300, 'x')),
@@ -40,10 +43,10 @@ TEST(Logger, EncodeArgRoundtrip) {
     encode_arg(c, std::string_view{"abc"});
 
     const std::byte* p = buf;
-    EXPECT_EQ(static_cast<ArgTag>(*p), ArgTag::U64);
-    uint64_t v = 0;
+    EXPECT_EQ(static_cast<ArgTag>(*p), ArgTag::I64); // int is signed
+    int64_t v = 0;
     std::memcpy(&v, p + 1, sizeof(v));
-    EXPECT_EQ(v, 7u);
+    EXPECT_EQ(v, 7);
     p += 9;
 
     EXPECT_EQ(static_cast<ArgTag>(*p), ArgTag::Str);
@@ -112,6 +115,30 @@ TEST(Logger, MultiThreadInterleaving) {
         EXPECT_NE(out.find("[DEBUG] T" + std::to_string(i)), std::string::npos);
         EXPECT_NE(out.find("[INFO] M" + std::to_string(i)), std::string::npos);
     }
+}
+
+// Signed values must come out with their sign, not as 2^64-style garbage;
+// bool and char must render as true/false and the character itself.
+TEST(Logger, IntegerSignednessAndCharTypes) {
+    CoutCapture capture;
+
+    STERLOG_INFO("neg={}", -1);
+    STERLOG_INFO("min={}", INT64_MIN);
+    STERLOG_INFO("umax={}", UINT64_MAX);
+    STERLOG_INFO("flag={} flag2={}", true, false);
+    STERLOG_INFO("ch={}", 'x');
+    STERLOG_INFO("short={}", static_cast<short>(-42));
+    STERLOG_INFO("uchar={}", static_cast<unsigned char>(200));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    auto out = capture.capture.str();
+    EXPECT_NE(out.find("[INFO] neg=-1"), std::string::npos);
+    EXPECT_NE(out.find("[INFO] min=-9223372036854775808"), std::string::npos);
+    EXPECT_NE(out.find("[INFO] umax=18446744073709551615"), std::string::npos);
+    EXPECT_NE(out.find("[INFO] flag=true flag2=false"), std::string::npos);
+    EXPECT_NE(out.find("[INFO] ch=x"), std::string::npos);
+    EXPECT_NE(out.find("[INFO] short=-42"), std::string::npos);
+    EXPECT_NE(out.find("[INFO] uchar=200"), std::string::npos);
 }
 
 // Strings are copied into the record at the call site: logging a temporary

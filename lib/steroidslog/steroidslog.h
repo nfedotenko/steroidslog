@@ -63,6 +63,9 @@ enum class ArgTag : uint8_t {
     F64 = 1,
     Str = 2,  // inline bytes: u32 length + data
     CStr = 3, // static storage: u64 pointer + u32 length
+    I64 = 4,  // signed integers, rendered with their sign
+    Bool = 5, // rendered as true/false, 1 payload byte
+    Char = 6, // rendered as the character itself, 1 payload byte
 };
 
 namespace detail {
@@ -77,6 +80,8 @@ std::size_t encoded_size(const T& v) noexcept {
     using U = std::remove_cvref_t<T>;
     if constexpr (std::is_same_v<U, static_str>) {
         return 1 + sizeof(uint64_t) + sizeof(uint32_t);
+    } else if constexpr (std::is_same_v<U, bool> || std::is_same_v<U, char>) {
+        return 1 + 1;
     } else if constexpr (std::is_integral_v<U> || std::is_floating_point_v<U>) {
         return 1 + sizeof(uint64_t);
     } else if constexpr (string_like<U>) {
@@ -108,10 +113,18 @@ void encode_arg(cursor& c, const T& v) noexcept {
         c.put_val(static_cast<uint8_t>(ArgTag::CStr));
         c.put_val(reinterpret_cast<uint64_t>(v.view.data()));
         c.put_val(static_cast<uint32_t>(v.view.size()));
+    } else if constexpr (std::is_same_v<U, bool>) {
+        c.put_val(static_cast<uint8_t>(ArgTag::Bool));
+        c.put_val(static_cast<uint8_t>(v ? 1 : 0));
+    } else if constexpr (std::is_same_v<U, char>) {
+        c.put_val(static_cast<uint8_t>(ArgTag::Char));
+        c.put_val(v);
+    } else if constexpr (std::is_integral_v<U> && std::is_signed_v<U>) {
+        c.put_val(static_cast<uint8_t>(ArgTag::I64));
+        c.put_val(static_cast<int64_t>(v));
     } else if constexpr (std::is_integral_v<U>) {
-        // Signedness/bool/char rendering tightens in a follow-up change.
         c.put_val(static_cast<uint8_t>(ArgTag::U64));
-        c.put_val(static_cast<uint64_t>(static_cast<uintptr_t>(v)));
+        c.put_val(static_cast<uint64_t>(v));
     } else if constexpr (std::is_floating_point_v<U>) {
         c.put_val(static_cast<uint8_t>(ArgTag::F64));
         c.put_val(static_cast<double>(v));
@@ -294,6 +307,27 @@ private:
                     std::memcpy(&v, p, sizeof(v));
                     p += sizeof(v);
                     storage[i] = std::to_string(v);
+                    views[i] = storage[i];
+                    break;
+                }
+                case ArgTag::I64: {
+                    int64_t v = 0;
+                    std::memcpy(&v, p, sizeof(v));
+                    p += sizeof(v);
+                    storage[i] = std::to_string(v);
+                    views[i] = storage[i];
+                    break;
+                }
+                case ArgTag::Bool: {
+                    const bool v = (*p != std::byte{0});
+                    p += 1;
+                    views[i] = v ? std::string_view{"true"}
+                                 : std::string_view{"false"};
+                    break;
+                }
+                case ArgTag::Char: {
+                    storage[i].assign(reinterpret_cast<const char*>(p), 1);
+                    p += 1;
                     views[i] = storage[i];
                     break;
                 }
