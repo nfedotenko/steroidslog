@@ -5,13 +5,17 @@ project(steroidslog)
 file(GLOB_RECURSE STEROIDSLOG_SRC CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/steroidslog/*.cpp")
 
+include(${CMAKE_SOURCE_DIR}/cmake/Steroids.cmake)
+
 if(STEROIDSLOG_SRC)
     add_library(${PROJECT_NAME} STATIC ${STEROIDSLOG_SRC})
 
     target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_SOURCE_DIR}/lib)
+    target_link_libraries(${PROJECT_NAME} PUBLIC steroids::steroids)
 else() # single header
     add_library(${PROJECT_NAME} INTERFACE)
 
+    target_link_libraries(${PROJECT_NAME} INTERFACE steroids::steroids)
     target_include_directories(${PROJECT_NAME} PUBLIC
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/lib>
         $<INSTALL_INTERFACE:lib>)
