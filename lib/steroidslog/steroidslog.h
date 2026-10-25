@@ -25,6 +25,16 @@
 
 #define STERLOG_CACHELINE 64
 
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) ||             \
+    defined(_M_IX86)
+#include <immintrin.h>
+#define STERLOG_CPU_PAUSE() _mm_pause()
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#define STERLOG_CPU_PAUSE() __asm__ volatile("yield")
+#else
+#define STERLOG_CPU_PAUSE() ((void)0)
+#endif
+
 namespace steroidslog {
 
 //------------------------------------------------------------------------------
@@ -155,6 +165,12 @@ enum class LogLevel : uint8_t {
     Unknown
 };
 
+// What a producer does when its ring is full.
+enum class OverflowPolicy : uint8_t {
+    Drop,  // count the record as dropped and move on (default)
+    Block, // spin with backoff until the consumer frees space
+};
+
 //------------------------------------------------------------------------------
 
 class Logger final {
@@ -164,6 +180,10 @@ class Logger final {
         alignas(STERLOG_CACHELINE) queue_t q;
         alignas(STERLOG_CACHELINE) std::atomic<bool> active{true};
         ProducerNode* next{nullptr};
+        // Written by the producer under the Drop policy.
+        alignas(STERLOG_CACHELINE) std::atomic<uint64_t> dropped{0};
+        // Consumer-owned: how many drops it has already reported.
+        alignas(STERLOG_CACHELINE) uint64_t dropped_seen{0};
     };
 
 public:
@@ -181,6 +201,25 @@ public:
         }
     }
 
+    // The policy applies to every producer; checked only when a ring is full.
+    static void set_overflow_policy(OverflowPolicy p) noexcept {
+        policy_.store(p, std::memory_order_relaxed);
+    }
+
+    static OverflowPolicy overflow_policy() noexcept {
+        return policy_.load(std::memory_order_relaxed);
+    }
+
+    // Total records dropped across all producers since startup.
+    uint64_t dropped_count() const noexcept {
+        uint64_t total = 0;
+        for (ProducerNode* p = head_.load(std::memory_order_acquire); p;
+             p = p->next) {
+            total += p->dropped.load(std::memory_order_relaxed);
+        }
+        return total;
+    }
+
     template <uint32_t Id, class... Args>
     void enqueue(Args&&... args) noexcept {
         static_assert(sizeof...(Args) <= MAX_ARGS, "Too many log args");
@@ -192,14 +231,29 @@ public:
             (std::size_t{0} + ... + detail::encoded_size(args));
         const std::size_t total = (header_size + payload + 3u) & ~std::size_t{3};
 
-        // Non-blocking try; drop if full to avoid stalling producers.
-        // (A configurable overflow policy lands in a follow-up.)
-        std::byte* p = nullptr;
-        for (int tries = 0; tries < 4 && !p; ++tries) {
-            p = node->q.reserve(total);
-        }
-        if (!p) {
-            return;
+        std::byte* p = node->q.reserve(total);
+        if (!p) [[unlikely]] {
+            if (overflow_policy() == OverflowPolicy::Drop) {
+                node->dropped.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            // Block: spin with exponential backoff until the consumer frees
+            // space. Falls back to dropping if the logger is shutting down —
+            // nobody will ever drain the ring then.
+            uint32_t spins = 0;
+            do {
+                if (done_.load(std::memory_order_acquire)) {
+                    node->dropped.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+                const uint32_t pauses = 1u << std::min(spins++, 6u);
+                for (uint32_t i = 0; i < pauses; ++i) {
+                    STERLOG_CPU_PAUSE();
+                }
+                if (spins > 16) {
+                    std::this_thread::yield();
+                }
+            } while (!(p = node->q.reserve(total)));
         }
 
         detail::cursor c{p};
@@ -391,11 +445,24 @@ private:
             std::cout.put('\n');
         };
 
+        // Surfaces drops instead of losing them silently: whenever a
+        // producer's drop counter moved, say so in the output stream.
+        auto report_drops = [](ProducerNode* p) {
+            const uint64_t d = p->dropped.load(std::memory_order_relaxed);
+            if (d != p->dropped_seen) {
+                std::cout << "[WARNING] steroidslog: dropped "
+                          << (d - p->dropped_seen) << " records (total " << d
+                          << ")\n";
+                p->dropped_seen = d;
+            }
+        };
+
         while (!done_.load(std::memory_order_acquire)) {
             bool did = false;
             // Poll all queues in a round-robin; batch to amortize fences
             for (ProducerNode* p = head_.load(std::memory_order_acquire); p;
                  p = p->next) {
+                report_drops(p);
                 if (!p->active.load(std::memory_order_acquire) &&
                     p->q.empty()) {
                     continue;
@@ -428,6 +495,7 @@ private:
                 format_and_emit(rec);
                 p->q.pop();
             }
+            report_drops(p);
         }
     }
 
@@ -438,16 +506,20 @@ private:
     // Per-thread registration
     static thread_local TL tls_;
 
+    static std::atomic<OverflowPolicy> policy_;
+
     std::atomic<bool> done_{false};
     std::thread worker_;
 };
 
 inline std::atomic<Logger::ProducerNode*> Logger::head_{nullptr};
 inline thread_local Logger::TL Logger::tls_{};
+inline std::atomic<OverflowPolicy> Logger::policy_{OverflowPolicy::Drop};
 
 } // namespace steroidslog
 
 #undef STERLOG_CACHELINE
+#undef STERLOG_CPU_PAUSE
 
 //------------------------------------------------------------------------------
 

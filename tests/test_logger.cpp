@@ -216,6 +216,58 @@ TEST(Logger, StaticStrIsShippedByPointer) {
     EXPECT_NE(out.find("[INFO] msg=static banner"), std::string::npos);
 }
 
+// Under the default Drop policy a flooded ring counts its losses and the
+// consumer reports them in the stream instead of losing records silently.
+TEST(Logger, DropPolicyCountsAndReports) {
+    CoutCapture capture;
+    auto& log = Logger::instance();
+    ASSERT_EQ(Logger::overflow_policy(), OverflowPolicy::Drop);
+
+    const uint64_t before = log.dropped_count();
+    for (int i = 0; i < 200000; ++i) {
+        STERLOG_INFO("flood {}", i);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    EXPECT_GT(log.dropped_count(), before);
+    EXPECT_NE(capture.capture.str().find("steroidslog: dropped"),
+              std::string::npos);
+}
+
+// Under Block the producer waits for the consumer: every record arrives and
+// the drop counter does not move.
+TEST(Logger, BlockPolicyLosesNothing) {
+    CoutCapture capture;
+    auto& log = Logger::instance();
+    Logger::set_overflow_policy(OverflowPolicy::Block);
+
+    const uint64_t before = log.dropped_count();
+    constexpr int N = 20000;
+    for (int i = 0; i < N; ++i) {
+        STERLOG_INFO("blk#{}#", i);
+    }
+
+    // Wait until the consumer has drained everything (bounded).
+    int lines = 0;
+    for (int tries = 0; tries < 60; ++tries) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const auto out = capture.capture.str();
+        lines = 0;
+        for (std::size_t pos = 0;
+             (pos = out.find("[INFO] blk#", pos)) != std::string::npos;
+             ++pos) {
+            ++lines;
+        }
+        if (lines == N) {
+            break;
+        }
+    }
+    Logger::set_overflow_policy(OverflowPolicy::Drop);
+
+    EXPECT_EQ(lines, N);
+    EXPECT_EQ(log.dropped_count(), before);
+}
+
 // Shutdown does not corrupt messages
 TEST(Logger, ShutdownFlushesQueue) {
     CoutCapture capture;
