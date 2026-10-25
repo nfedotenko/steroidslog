@@ -87,6 +87,13 @@ concept string_like =
     std::is_convertible_v<const T&, std::string_view> &&
     !std::is_same_v<std::remove_cvref_t<T>, static_str>;
 
+// Type used for compile-time std::format_string validation: static_str is
+// our own wrapper, the formatter sees it as a string_view.
+template <class T>
+using fmt_check_t =
+    std::conditional_t<std::is_same_v<std::remove_cvref_t<T>, static_str>,
+                       std::string_view, std::remove_cvref_t<T>>;
+
 template <class T>
 std::size_t encoded_size(const T& v) noexcept {
     using U = std::remove_cvref_t<T>;
@@ -232,9 +239,14 @@ public:
         return total;
     }
 
-    template <uint32_t Id, class... Args>
-    void enqueue(Args&&... args) noexcept {
+    // Fmt is a consteval lambda returning the format literal; the format
+    // string is validated against the argument types at compile time with
+    // the same rules as std::format itself.
+    template <uint32_t Id, class Fmt, class... Args>
+    void enqueue(Fmt, Args&&... args) noexcept {
         static_assert(sizeof...(Args) <= MAX_ARGS, "Too many log args");
+        [[maybe_unused]] static constexpr auto checked_fmt_ =
+            std::format_string<detail::fmt_check_t<Args>...>(Fmt{}());
         ProducerNode* node = ensure_tls_node();
 
         constexpr std::size_t header_size =
@@ -315,42 +327,53 @@ private:
     }
 
     void run() {
-        auto format_simple = [](std::string_view fmt,
-                                std::span<std::string_view> args) {
-            std::string out;
-            out.reserve(fmt.size() + 32);
-            std::size_t ai = 0;
+        // One decoded argument; sv may point into the ring, so a record is
+        // always formatted and written before pop().
+        struct DecodedArg {
+            ArgTag tag{};
+            uint64_t u{};
+            int64_t i{};
+            double d{};
+            float f{};
+            bool b{};
+            char c{};
+            std::string_view sv{};
+        };
 
-            for (std::size_t i = 0; i < fmt.size();) {
-                char c = fmt[i];
-                if (c == '{') {
-                    if (i + 1 < fmt.size() && fmt[i + 1] == '{') { // escaped {{
-                        out.push_back('{');
-                        i += 2;
-                    } else if (i + 1 < fmt.size() && fmt[i + 1] == '}') { // {}
-                        if (ai < args.size())
-                            out.append(args[ai++]);
-                        else
-                            out.append("{}"); // graceful fallback
-                        i += 2;
-                    } else { // lone '{' -> literal
-                        out.push_back('{');
-                        ++i;
-                    }
-                } else if (c == '}') {
-                    if (i + 1 < fmt.size() && fmt[i + 1] == '}') { // escaped }}
-                        out.push_back('}');
-                        i += 2;
-                    } else { // lone '}' -> literal
-                        out.push_back('}');
-                        ++i;
-                    }
-                } else {
-                    out.push_back(c);
-                    ++i;
-                }
+        std::string line;      // reused across records
+        line.reserve(512);
+        std::string field_fmt; // reused per replacement field
+        field_fmt.reserve(32);
+
+        // Formats one decoded argument into `line` with the "{...}" field
+        // from the format string, via std::vformat_to — full std::format
+        // spec support without per-argument string allocations.
+        auto append_arg = [&line](const DecodedArg& a, std::string_view field) {
+            auto out = std::back_inserter(line);
+            switch (a.tag) {
+            case ArgTag::U64:
+                std::vformat_to(out, field, std::make_format_args(a.u));
+                break;
+            case ArgTag::I64:
+                std::vformat_to(out, field, std::make_format_args(a.i));
+                break;
+            case ArgTag::F64:
+                std::vformat_to(out, field, std::make_format_args(a.d));
+                break;
+            case ArgTag::F32:
+                std::vformat_to(out, field, std::make_format_args(a.f));
+                break;
+            case ArgTag::Bool:
+                std::vformat_to(out, field, std::make_format_args(a.b));
+                break;
+            case ArgTag::Char:
+                std::vformat_to(out, field, std::make_format_args(a.c));
+                break;
+            case ArgTag::Str:
+            case ArgTag::CStr:
+                std::vformat_to(out, field, std::make_format_args(a.sv));
+                break;
             }
-            return out;
         };
 
         // Decodes one record; the string_view args may point into the ring,
@@ -373,70 +396,43 @@ private:
                 fmt = std::string_view{"{}"};
             }
 
-            std::array<std::string, MAX_ARGS> storage;
-            std::array<std::string_view, MAX_ARGS> views;
+            std::array<DecodedArg, MAX_ARGS> args{};
             const std::size_t n_args =
                 std::min<std::size_t>(argc, MAX_ARGS);
             for (std::size_t i = 0; i < n_args; ++i) {
-                const auto tag = static_cast<ArgTag>(*p);
+                DecodedArg& a = args[i];
+                a.tag = static_cast<ArgTag>(*p);
                 p += 1;
-                switch (tag) {
-                case ArgTag::U64: {
-                    uint64_t v = 0;
-                    std::memcpy(&v, p, sizeof(v));
-                    p += sizeof(v);
-                    storage[i] = std::to_string(v);
-                    views[i] = storage[i];
+                switch (a.tag) {
+                case ArgTag::U64:
+                    std::memcpy(&a.u, p, sizeof(a.u));
+                    p += sizeof(a.u);
                     break;
-                }
-                case ArgTag::I64: {
-                    int64_t v = 0;
-                    std::memcpy(&v, p, sizeof(v));
-                    p += sizeof(v);
-                    storage[i] = std::to_string(v);
-                    views[i] = storage[i];
+                case ArgTag::I64:
+                    std::memcpy(&a.i, p, sizeof(a.i));
+                    p += sizeof(a.i);
                     break;
-                }
-                case ArgTag::Bool: {
-                    const bool v = (*p != std::byte{0});
+                case ArgTag::Bool:
+                    a.b = (*p != std::byte{0});
                     p += 1;
-                    views[i] = v ? std::string_view{"true"}
-                                 : std::string_view{"false"};
                     break;
-                }
-                case ArgTag::Char: {
-                    storage[i].assign(reinterpret_cast<const char*>(p), 1);
+                case ArgTag::Char:
+                    a.c = static_cast<char>(*p);
                     p += 1;
-                    views[i] = storage[i];
                     break;
-                }
-                case ArgTag::F64: {
-                    double v = 0;
-                    std::memcpy(&v, p, sizeof(v));
-                    p += sizeof(v);
-                    // Shortest round-trip form: 1e-8 stays 1e-08 instead of
-                    // collapsing to 0.000000 like std::to_string did.
-                    char buf[32];
-                    const auto res = std::to_chars(buf, buf + sizeof(buf), v);
-                    storage[i].assign(buf, res.ptr);
-                    views[i] = storage[i];
+                case ArgTag::F64:
+                    std::memcpy(&a.d, p, sizeof(a.d));
+                    p += sizeof(a.d);
                     break;
-                }
-                case ArgTag::F32: {
-                    float v = 0;
-                    std::memcpy(&v, p, sizeof(v));
-                    p += sizeof(v);
-                    char buf[32];
-                    const auto res = std::to_chars(buf, buf + sizeof(buf), v);
-                    storage[i].assign(buf, res.ptr);
-                    views[i] = storage[i];
+                case ArgTag::F32:
+                    std::memcpy(&a.f, p, sizeof(a.f));
+                    p += sizeof(a.f);
                     break;
-                }
                 case ArgTag::Str: {
                     uint32_t len = 0;
                     std::memcpy(&len, p, sizeof(len));
                     p += sizeof(len);
-                    views[i] =
+                    a.sv =
                         std::string_view(reinterpret_cast<const char*>(p), len);
                     p += len;
                     break;
@@ -448,18 +444,74 @@ private:
                     p += sizeof(ptr);
                     std::memcpy(&len, p, sizeof(len));
                     p += sizeof(len);
-                    views[i] = std::string_view(
+                    a.sv = std::string_view(
                         reinterpret_cast<const char*>(ptr), len);
                     break;
                 }
                 }
             }
 
-            std::string s = format_simple(fmt,
-                std::span<std::string_view>{views.data(), n_args});
+            // Render replacement fields one by one: "{}", "{:spec}" and
+            // positional "{N...}" are supported; a field that cannot be
+            // rendered (index out of range, spec invalid for the shipped
+            // type, dynamic width "{:{}}") is kept verbatim.
+            line.clear();
+            std::size_t auto_idx = 0;
+            for (std::size_t i = 0; i < fmt.size();) {
+                const char ch = fmt[i];
+                if (ch == '{') {
+                    if (i + 1 < fmt.size() && fmt[i + 1] == '{') { // {{
+                        line.push_back('{');
+                        i += 2;
+                        continue;
+                    }
+                    const std::size_t close = fmt.find('}', i);
+                    if (close == std::string_view::npos) { // lone '{'
+                        line.append(fmt.substr(i));
+                        break;
+                    }
+                    const std::string_view inner =
+                        fmt.substr(i + 1, close - i - 1);
+                    // Optional explicit argument index before ':' or '}'.
+                    std::size_t k = 0;
+                    std::size_t idx = 0;
+                    while (k < inner.size() && inner[k] >= '0' &&
+                           inner[k] <= '9') {
+                        idx = idx * 10 + static_cast<std::size_t>(
+                                             inner[k] - '0');
+                        ++k;
+                    }
+                    const bool have_idx =
+                        k > 0 && (k == inner.size() || inner[k] == ':');
+                    const std::size_t ai = have_idx ? idx : auto_idx++;
+                    field_fmt.clear();
+                    field_fmt.push_back('{');
+                    field_fmt.append(have_idx ? inner.substr(k) : inner);
+                    field_fmt.push_back('}');
+
+                    const std::string_view raw = fmt.substr(i, close - i + 1);
+                    if (ai >= n_args) {
+                        line.append(raw);
+                    } else {
+                        try {
+                            append_arg(args[ai], field_fmt);
+                        } catch (const std::exception&) {
+                            line.append(raw);
+                        }
+                    }
+                    i = close + 1;
+                } else if (ch == '}') { // }} or lone '}' -> literal
+                    line.push_back('}');
+                    i += (i + 1 < fmt.size() && fmt[i + 1] == '}') ? 2 : 1;
+                } else {
+                    line.push_back(ch);
+                    ++i;
+                }
+            }
+
             const std::size_t n =
-                std::min<std::size_t>(s.size(), MAX_MSG_LEN - 1);
-            std::cout.write(s.data(), static_cast<std::streamsize>(n));
+                std::min<std::size_t>(line.size(), MAX_MSG_LEN - 1);
+            std::cout.write(line.data(), static_cast<std::streamsize>(n));
             std::cout.put('\n');
         };
 
@@ -601,7 +653,10 @@ inline std::atomic<uint64_t> Logger::reclaimed_dropped_{0};
                     std::string_view(SL_LEVEL_PREFIX(level) fmt);              \
                 return true;                                                   \
             }();                                                               \
-            Logger::instance().enqueue<SL_CAT(_id_, __LINE__)>(__VA_ARGS__);   \
+            Logger::instance().enqueue<SL_CAT(_id_, __LINE__)>(               \
+                []() consteval {                                               \
+                    return std::string_view(SL_LEVEL_PREFIX(level) fmt);      \
+                } __VA_OPT__(, ) __VA_ARGS__);                                 \
         }                                                                      \
     }
 

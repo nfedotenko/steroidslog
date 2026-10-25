@@ -216,6 +216,25 @@ TEST(Logger, StaticStrIsShippedByPointer) {
     EXPECT_NE(out.find("[INFO] msg=static banner"), std::string::npos);
 }
 
+// Full std::format spec support on the consumer: width, fill, precision,
+// hex, positional indices and escaped braces.
+TEST(Logger, FormatSpecsWork) {
+    CoutCapture capture;
+
+    STERLOG_INFO("hex={:#x} pad={:>6} prec={:.2f}", 255, 42, 3.14159);
+    STERLOG_INFO("pos: {1} {0}", "a", "b");
+    STERLOG_INFO("esc {{}} v={}", 7);
+    STERLOG_INFO("str={:>5}", "ab");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    const auto out = capture.capture.str();
+    EXPECT_NE(out.find("[INFO] hex=0xff pad=    42 prec=3.14"),
+              std::string::npos);
+    EXPECT_NE(out.find("[INFO] pos: b a"), std::string::npos);
+    EXPECT_NE(out.find("[INFO] esc {} v=7"), std::string::npos);
+    EXPECT_NE(out.find("[INFO] str=   ab"), std::string::npos);
+}
+
 // Records written right before a thread exits must still reach the sink:
 // the consumer drains an inactive node before reclaiming it.
 TEST(Logger, DyingThreadRecordsAreFlushed) {
