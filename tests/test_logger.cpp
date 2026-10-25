@@ -216,6 +216,39 @@ TEST(Logger, StaticStrIsShippedByPointer) {
     EXPECT_NE(out.find("[INFO] msg=static banner"), std::string::npos);
 }
 
+// Every line is prefixed with a wall-clock timestamp resolved from the
+// producer-side tick stamp; timestamps are non-decreasing per producer.
+TEST(Logger, ProducerTimestampsPrefixLines) {
+    CoutCapture capture;
+
+    STERLOG_INFO("stamp one");
+    STERLOG_INFO("stamp two");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    const auto out = capture.capture.str();
+
+    auto ts_before = [&](std::string_view marker) {
+        const std::size_t pos = out.find(marker);
+        EXPECT_NE(pos, std::string::npos) << marker;
+        // "HH:MM:SS.ffffff " is 16 chars right before the marker.
+        EXPECT_GE(pos, 16u);
+        const std::string ts = out.substr(pos - 16, 15);
+        const char* pattern = "dd:dd:dd.dddddd";
+        for (std::size_t i = 0; i < 15; ++i) {
+            if (pattern[i] == 'd') {
+                EXPECT_TRUE(ts[i] >= '0' && ts[i] <= '9') << ts;
+            } else {
+                EXPECT_EQ(ts[i], pattern[i]) << ts;
+            }
+        }
+        return ts;
+    };
+
+    const std::string t1 = ts_before("[INFO] stamp one");
+    const std::string t2 = ts_before("[INFO] stamp two");
+    EXPECT_LE(t1, t2);
+}
+
 // Full std::format spec support on the consumer: width, fill, precision,
 // hex, positional indices and escaped braces.
 TEST(Logger, FormatSpecsWork) {
