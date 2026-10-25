@@ -7,12 +7,16 @@
 
 #include "misc/pseudomap.h"
 #include "misc/spsc_byte_ring.h"
+#include "misc/tsc_clock.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <charconv>
+#include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <ctime>
 #include <cstring>
 #include <format>
 #include <iostream>
@@ -53,6 +57,7 @@ static constexpr int BATCH_DEQ = 64;                  // backend batch per queue
 //
 //   u32 total_size (multiple of 4, includes this field)
 //   u32 fmt_id
+//   u64 ticks (rdticks() at the call site; wall time is resolved on emit)
 //   u8  arg_count
 //   per argument: u8 tag, then its payload
 //
@@ -249,8 +254,11 @@ public:
             std::format_string<detail::fmt_check_t<Args>...>(Fmt{}());
         ProducerNode* node = ensure_tls_node();
 
-        constexpr std::size_t header_size =
-            sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t);
+        const uint64_t ticks = rdticks(); // stamp at the call, not at emit
+
+        constexpr std::size_t header_size = sizeof(uint32_t) +
+                                            sizeof(uint32_t) +
+                                            sizeof(uint64_t) + sizeof(uint8_t);
         const std::size_t payload =
             (std::size_t{0} + ... + detail::encoded_size(args));
         const std::size_t total = (header_size + payload + 3u) & ~std::size_t{3};
@@ -283,6 +291,7 @@ public:
         detail::cursor c{p};
         c.put_val(static_cast<uint32_t>(total));
         c.put_val(Id);
+        c.put_val(ticks);
         c.put_val(static_cast<uint8_t>(sizeof...(Args)));
         (detail::encode_arg(c, args), ...);
         node->q.commit();
@@ -327,6 +336,11 @@ private:
     }
 
     void run() {
+        // Anchor producer tick stamps to wall time. Costs the worker ~10 ms
+        // once at startup; producers are unaffected (records queue up and
+        // carry their tick stamps taken at the call site).
+        const tsc_calibration calib = tsc_calibration::measure();
+
         // One decoded argument; sv may point into the ring, so a record is
         // always formatted and written before pop().
         struct DecodedArg {
@@ -385,6 +399,10 @@ private:
             uint32_t id = 0;
             std::memcpy(&id, p, sizeof(id));
             p += sizeof(id);
+
+            uint64_t ticks = 0;
+            std::memcpy(&ticks, p, sizeof(ticks));
+            p += sizeof(ticks);
 
             uint8_t argc = 0;
             std::memcpy(&argc, p, sizeof(argc));
@@ -456,6 +474,28 @@ private:
             // rendered (index out of range, spec invalid for the shipped
             // type, dynamic width "{:{}}") is kept verbatim.
             line.clear();
+            {
+                // UTC time-of-day with microseconds, resolved from the
+                // producer's tick stamp.
+                const auto tp = calib.to_wall(ticks);
+                const auto since =
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        tp.time_since_epoch())
+                        .count();
+                const std::time_t secs =
+                    std::chrono::system_clock::to_time_t(tp);
+                std::tm tm{};
+#if defined(_WIN32)
+                gmtime_s(&tm, &secs);
+#else
+                gmtime_r(&secs, &tm);
+#endif
+                char ts[20];
+                std::snprintf(ts, sizeof(ts), "%02d:%02d:%02d.%06d ",
+                              tm.tm_hour, tm.tm_min, tm.tm_sec,
+                              static_cast<int>(since % 1000000));
+                line.append(ts);
+            }
             std::size_t auto_idx = 0;
             for (std::size_t i = 0; i < fmt.size();) {
                 const char ch = fmt[i];
