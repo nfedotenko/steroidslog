@@ -216,6 +216,51 @@ TEST(Logger, StaticStrIsShippedByPointer) {
     EXPECT_NE(out.find("[INFO] msg=static banner"), std::string::npos);
 }
 
+// Records written right before a thread exits must still reach the sink:
+// the consumer drains an inactive node before reclaiming it.
+TEST(Logger, DyingThreadRecordsAreFlushed) {
+    CoutCapture capture;
+
+    for (int i = 0; i < 8; ++i) {
+        std::thread t([i] { STERLOG_INFO("dying-thread-{} says bye", i); });
+        t.join();
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    const auto out = capture.capture.str();
+    for (int i = 0; i < 8; ++i) {
+        const std::string expect =
+            "[INFO] dying-thread-" + std::to_string(i) + " says bye";
+        EXPECT_NE(out.find(expect), std::string::npos) << expect;
+    }
+}
+
+// Producer nodes of exited threads are unlinked and freed by the consumer;
+// the registry must not grow with thread churn. Run under ASan/TSan in CI.
+TEST(Logger, ThreadNodesAreReclaimed) {
+    auto& log = Logger::instance();
+
+    // Let the consumer reclaim leftovers from earlier tests first.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    const std::size_t before = log.producer_node_count();
+
+    for (int i = 0; i < 16; ++i) {
+        std::thread t([i] { STERLOG_DEBUG("churn {}", i); });
+        t.join();
+    }
+
+    // Bounded wait for the consumer to drain and reclaim all 16 nodes.
+    std::size_t after = SIZE_MAX;
+    for (int tries = 0; tries < 60; ++tries) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        after = log.producer_node_count();
+        if (after <= before) {
+            break;
+        }
+    }
+    EXPECT_LE(after, before);
+}
+
 // Under the default Drop policy a flooded ring counts its losses and the
 // consumer reports them in the stream instead of losing records silently.
 TEST(Logger, DropPolicyCountsAndReports) {
