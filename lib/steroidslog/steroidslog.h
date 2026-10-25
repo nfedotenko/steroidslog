@@ -6,7 +6,7 @@
 #pragma once
 
 #include "misc/pseudomap.h"
-#include "misc/spsc_bounded_queue.h"
+#include "misc/spsc_byte_ring.h"
 
 #include <algorithm>
 #include <array>
@@ -21,15 +21,6 @@
 #include <thread>
 #include <type_traits>
 #include <utility>
-#include <variant>
-
-#if defined(_MSC_VER)
-#define STERLOG_RESTRICT __restrict
-#elif defined(__clang__) || defined(__GNUC__)
-#define STERLOG_RESTRICT __restrict__
-#else
-#define STERLOG_RESTRICT
-#endif
 
 #define STERLOG_CACHELINE 64
 
@@ -39,34 +30,102 @@ namespace steroidslog {
 // Tunables
 //------------------------------------------------------------------------------
 static constexpr std::size_t MAX_ARGS = 8;
-static constexpr std::size_t QUEUE_CAP = 1024;  // per-thread SPSC capacity
-static constexpr std::size_t MAX_MSG_LEN = 256; // emit truncation cap
-static constexpr int BATCH_DEQ = 64;            // backend batch per queue
+static constexpr std::size_t QUEUE_BYTES = 64 * 1024; // per-thread ring size
+static constexpr std::size_t MAX_MSG_LEN = 256;       // emit truncation cap
+static constexpr std::size_t MAX_STR_ARG = 256;       // inline string arg cap
+static constexpr int BATCH_DEQ = 64;                  // backend batch per queue
 
 //------------------------------------------------------------------------------
-// Arg packing
+// Argument encoding
+//
+// A log record is a variable-length byte sequence in the per-thread ring:
+//
+//   u32 total_size (multiple of 4, includes this field)
+//   u32 fmt_id
+//   u8  arg_count
+//   per argument: u8 tag, then its payload
+//
+// Numbers ship as 8 raw bytes. Strings are copied inline (length-prefixed,
+// truncated to MAX_STR_ARG) so the record never refers to producer memory —
+// logging a temporary std::string is safe. A string wrapped in static_str
+// ships as pointer + length instead and must outlive the logger.
 //------------------------------------------------------------------------------
-using arg_slot_t = std::variant<uint64_t, double, std::string_view>;
+
+// Explicit marker for strings with static storage duration ("foo", string
+// constants): the logger ships only the pointer instead of copying the bytes.
+struct static_str {
+    std::string_view view;
+    constexpr explicit static_str(std::string_view sv) noexcept : view(sv) {}
+};
+
+enum class ArgTag : uint8_t {
+    U64 = 0,
+    F64 = 1,
+    Str = 2,  // inline bytes: u32 length + data
+    CStr = 3, // static storage: u64 pointer + u32 length
+};
+
+namespace detail {
 
 template <class T>
-constexpr arg_slot_t make_argslot(T&& v) {
+concept string_like =
+    std::is_convertible_v<const T&, std::string_view> &&
+    !std::is_same_v<std::remove_cvref_t<T>, static_str>;
+
+template <class T>
+std::size_t encoded_size(const T& v) noexcept {
     using U = std::remove_cvref_t<T>;
-    if constexpr (std::is_integral_v<U>) {
-        return static_cast<uint64_t>(static_cast<uintptr_t>(v));
-    } else if constexpr (std::is_floating_point_v<U>) {
-        return static_cast<double>(v);
-    } else if constexpr (std::is_convertible_v<U, std::string_view>) {
-        return std::string_view(v);
+    if constexpr (std::is_same_v<U, static_str>) {
+        return 1 + sizeof(uint64_t) + sizeof(uint32_t);
+    } else if constexpr (std::is_integral_v<U> || std::is_floating_point_v<U>) {
+        return 1 + sizeof(uint64_t);
+    } else if constexpr (string_like<U>) {
+        const std::string_view sv(v);
+        return 1 + sizeof(uint32_t) + std::min(sv.size(), MAX_STR_ARG);
     } else {
         static_assert(!sizeof(U), "Unsupported type for log argument");
     }
 }
 
-struct RawLogRecord final {
-    uint32_t fmt_id;   // compile-time hash
-    uint8_t arg_count; // <= MAX_ARGS
-    arg_slot_t args[MAX_ARGS];
+struct cursor {
+    std::byte* p;
+
+    void put(const void* src, std::size_t n) noexcept {
+        std::memcpy(p, src, n);
+        p += n;
+    }
+
+    template <class T>
+    void put_val(T v) noexcept {
+        put(&v, sizeof(v));
+    }
 };
+
+template <class T>
+void encode_arg(cursor& c, const T& v) noexcept {
+    using U = std::remove_cvref_t<T>;
+    if constexpr (std::is_same_v<U, static_str>) {
+        c.put_val(static_cast<uint8_t>(ArgTag::CStr));
+        c.put_val(reinterpret_cast<uint64_t>(v.view.data()));
+        c.put_val(static_cast<uint32_t>(v.view.size()));
+    } else if constexpr (std::is_integral_v<U>) {
+        // Signedness/bool/char rendering tightens in a follow-up change.
+        c.put_val(static_cast<uint8_t>(ArgTag::U64));
+        c.put_val(static_cast<uint64_t>(static_cast<uintptr_t>(v)));
+    } else if constexpr (std::is_floating_point_v<U>) {
+        c.put_val(static_cast<uint8_t>(ArgTag::F64));
+        c.put_val(static_cast<double>(v));
+    } else { // string-like: copy the bytes into the record
+        const std::string_view sv(v);
+        const auto len =
+            static_cast<uint32_t>(std::min(sv.size(), MAX_STR_ARG));
+        c.put_val(static_cast<uint8_t>(ArgTag::Str));
+        c.put_val(len);
+        c.put(sv.data(), len);
+    }
+}
+
+} // namespace detail
 
 enum class LogLevel : uint8_t {
     Debug,
@@ -79,7 +138,7 @@ enum class LogLevel : uint8_t {
 //------------------------------------------------------------------------------
 
 class Logger final {
-    using queue_t = spsc_bounded_queue<RawLogRecord, QUEUE_CAP>;
+    using queue_t = spsc_byte_ring<QUEUE_BYTES>;
 
     struct ProducerNode {
         alignas(STERLOG_CACHELINE) queue_t q;
@@ -107,21 +166,28 @@ public:
         static_assert(sizeof...(Args) <= MAX_ARGS, "Too many log args");
         ProducerNode* node = ensure_tls_node();
 
-        RawLogRecord rec{Id, static_cast<uint8_t>(sizeof...(Args)), {}};
-
-        if constexpr (sizeof...(Args) > 0) {
-            // arg_slot_t tmp[] = {make_argslot(std::forward<Args>(args))...};
-            // std::memcpy(rec.args, tmp, sizeof(tmp));
-            arg_slot_t* STERLOG_RESTRICT dst = rec.args;
-            ((void)(*dst++ = make_argslot(std::forward<Args>(args))), ...);
-        }
+        constexpr std::size_t header_size =
+            sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t);
+        const std::size_t payload =
+            (std::size_t{0} + ... + detail::encoded_size(args));
+        const std::size_t total = (header_size + payload + 3u) & ~std::size_t{3};
 
         // Non-blocking try; drop if full to avoid stalling producers.
-        for (int tries = 0; tries < 4; ++tries) {
-            if (node->q.enqueue(std::move(rec))) {
-                return;
-            }
+        // (A configurable overflow policy lands in a follow-up.)
+        std::byte* p = nullptr;
+        for (int tries = 0; tries < 4 && !p; ++tries) {
+            p = node->q.reserve(total);
         }
+        if (!p) {
+            return;
+        }
+
+        detail::cursor c{p};
+        c.put_val(static_cast<uint32_t>(total));
+        c.put_val(Id);
+        c.put_val(static_cast<uint8_t>(sizeof...(Args)));
+        (detail::encode_arg(c, args), ...);
+        node->q.commit();
     }
 
 private:
@@ -195,8 +261,21 @@ private:
             return out;
         };
 
-        auto format_and_emit = [&](const RawLogRecord& rec) {
-            std::string_view fmt(pseudomap::get(rec.fmt_id));
+        // Decodes one record; the string_view args may point into the ring,
+        // so the record is consumed (formatted and written) before pop().
+        auto format_and_emit = [&](std::span<const std::byte> rec) {
+            const std::byte* p = rec.data();
+            p += sizeof(uint32_t); // total size, already known from the span
+
+            uint32_t id = 0;
+            std::memcpy(&id, p, sizeof(id));
+            p += sizeof(id);
+
+            uint8_t argc = 0;
+            std::memcpy(&argc, p, sizeof(argc));
+            p += sizeof(argc);
+
+            std::string_view fmt(pseudomap::get(id));
             // Fallback if not registered for some reason
             if (fmt.empty()) {
                 fmt = std::string_view{"{}"};
@@ -204,43 +283,76 @@ private:
 
             std::array<std::string, MAX_ARGS> storage;
             std::array<std::string_view, MAX_ARGS> views;
-            for (std::size_t i = 0; i < rec.arg_count; ++i) {
-                std::visit(
-                    [&](auto&& val) {
-                        using V = std::remove_cvref_t<decltype(val)>;
-                        if constexpr (std::is_same_v<V, uint64_t>) {
-                            storage[i] = std::to_string(val);
-                        } else if constexpr (std::is_same_v<V, double>) {
-                            storage[i] = std::to_string(val);
-                        } else { // string_view
-                            storage[i] = std::string(val);
-                        }
-                        views[i] = storage[i];
-                    },
-                    rec.args[i]);
+            const std::size_t n_args =
+                std::min<std::size_t>(argc, MAX_ARGS);
+            for (std::size_t i = 0; i < n_args; ++i) {
+                const auto tag = static_cast<ArgTag>(*p);
+                p += 1;
+                switch (tag) {
+                case ArgTag::U64: {
+                    uint64_t v = 0;
+                    std::memcpy(&v, p, sizeof(v));
+                    p += sizeof(v);
+                    storage[i] = std::to_string(v);
+                    views[i] = storage[i];
+                    break;
+                }
+                case ArgTag::F64: {
+                    double v = 0;
+                    std::memcpy(&v, p, sizeof(v));
+                    p += sizeof(v);
+                    storage[i] = std::to_string(v);
+                    views[i] = storage[i];
+                    break;
+                }
+                case ArgTag::Str: {
+                    uint32_t len = 0;
+                    std::memcpy(&len, p, sizeof(len));
+                    p += sizeof(len);
+                    views[i] =
+                        std::string_view(reinterpret_cast<const char*>(p), len);
+                    p += len;
+                    break;
+                }
+                case ArgTag::CStr: {
+                    uint64_t ptr = 0;
+                    uint32_t len = 0;
+                    std::memcpy(&ptr, p, sizeof(ptr));
+                    p += sizeof(ptr);
+                    std::memcpy(&len, p, sizeof(len));
+                    p += sizeof(len);
+                    views[i] = std::string_view(
+                        reinterpret_cast<const char*>(ptr), len);
+                    break;
+                }
+                }
             }
 
             std::string s = format_simple(fmt,
-                std::span<std::string_view>{views.data(), rec.arg_count});
+                std::span<std::string_view>{views.data(), n_args});
             const std::size_t n =
                 std::min<std::size_t>(s.size(), MAX_MSG_LEN - 1);
             std::cout.write(s.data(), static_cast<std::streamsize>(n));
             std::cout.put('\n');
         };
 
-        RawLogRecord rec;
         while (!done_.load(std::memory_order_acquire)) {
             bool did = false;
             // Poll all queues in a round-robin; batch to amortize fences
             for (ProducerNode* p = head_.load(std::memory_order_acquire); p;
                  p = p->next) {
                 if (!p->active.load(std::memory_order_acquire) &&
-                    p->q.approx_size() == 0) {
+                    p->q.empty()) {
                     continue;
                 }
                 int k = 0;
-                while (k < BATCH_DEQ && p->q.dequeue(rec)) {
+                while (k < BATCH_DEQ) {
+                    const auto rec = p->q.front();
+                    if (rec.empty()) {
+                        break;
+                    }
                     format_and_emit(rec);
+                    p->q.pop();
                     ++k;
                     did = true;
                 }
@@ -251,10 +363,15 @@ private:
         }
 
         // Drain
-        for (auto* p = head_.load(std::memory_order_acquire); 
+        for (auto* p = head_.load(std::memory_order_acquire);
             p; p = p->next) {
-            while (p->q.dequeue(rec)) {
+            for (;;) {
+                const auto rec = p->q.front();
+                if (rec.empty()) {
+                    break;
+                }
                 format_and_emit(rec);
+                p->q.pop();
             }
         }
     }
@@ -275,7 +392,6 @@ inline thread_local Logger::TL Logger::tls_{};
 
 } // namespace steroidslog
 
-#undef STERLOG_RESTRICT
 #undef STERLOG_CACHELINE
 
 //------------------------------------------------------------------------------
