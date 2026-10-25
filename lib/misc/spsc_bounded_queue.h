@@ -24,7 +24,7 @@ class spsc_bounded_queue {
 
 public:
     spsc_bounded_queue() noexcept
-        : head_(0), tail_(0), head_cache_(0), tail_cache_(0) {}
+        : tail_(0), head_cache_(0), head_(0), tail_cache_(0) {}
 
     spsc_bounded_queue(spsc_bounded_queue&&) = delete;
     spsc_bounded_queue& operator=(spsc_bounded_queue&&) = delete;
@@ -103,10 +103,13 @@ private:
         return true;
     }
 
-    alignas(SL_CACHELINE) std::atomic<std::size_t> head_;
+    // Grouped by owner: the producer touches tail_ + head_cache_ on one
+    // cache line, the consumer touches head_ + tail_cache_ on another —
+    // two lines instead of four, and no sharing between the two sides.
     alignas(SL_CACHELINE) std::atomic<std::size_t> tail_;
-    alignas(SL_CACHELINE) std::size_t head_cache_;
-    alignas(SL_CACHELINE) std::size_t tail_cache_;
+    std::size_t head_cache_;
+    alignas(SL_CACHELINE) std::atomic<std::size_t> head_;
+    std::size_t tail_cache_;
 
     struct Cell {
         alignas(T) std::byte bytes[sizeof(T)];
