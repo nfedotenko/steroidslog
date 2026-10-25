@@ -210,9 +210,21 @@ public:
         return policy_.load(std::memory_order_relaxed);
     }
 
-    // Total records dropped across all producers since startup.
+    // Number of live producer nodes; nodes of exited threads are reclaimed
+    // by the consumer once drained.
+    std::size_t producer_node_count() const noexcept {
+        std::size_t n = 0;
+        for (ProducerNode* p = head_.load(std::memory_order_acquire); p;
+             p = p->next) {
+            ++n;
+        }
+        return n;
+    }
+
+    // Total records dropped across all producers since startup, including
+    // producers whose nodes have already been reclaimed.
     uint64_t dropped_count() const noexcept {
-        uint64_t total = 0;
+        uint64_t total = reclaimed_dropped_.load(std::memory_order_relaxed);
         for (ProducerNode* p = head_.load(std::memory_order_acquire); p;
              p = p->next) {
             total += p->dropped.load(std::memory_order_relaxed);
@@ -285,6 +297,12 @@ private:
         ~TL() {
             if (node) {
                 node->active.store(false, std::memory_order_release);
+                // The consumer may reclaim the node from here on. Clear the
+                // pointer so a log call from another thread_local's
+                // destructor re-registers instead of writing into freed
+                // memory (that late node is never reclaimed — acceptable for
+                // the exotic log-after-TLS-teardown case).
+                node = nullptr;
             }
         }
     };
@@ -459,14 +477,17 @@ private:
 
         while (!done_.load(std::memory_order_acquire)) {
             bool did = false;
-            // Poll all queues in a round-robin; batch to amortize fences
-            for (ProducerNode* p = head_.load(std::memory_order_acquire); p;
-                 p = p->next) {
+            // Poll all queues in a round-robin; batch to amortize fences.
+            // Nodes whose thread has exited are drained and reclaimed here:
+            // active=false is released by the thread-local destructor after
+            // the producer's last ring write, so once the ring is empty the
+            // node can never receive data again. Producers only push-front,
+            // so the single consumer may safely rewrite next-links.
+            ProducerNode* prev = nullptr;
+            ProducerNode* p = head_.load(std::memory_order_acquire);
+            while (p) {
+                ProducerNode* next = p->next;
                 report_drops(p);
-                if (!p->active.load(std::memory_order_acquire) &&
-                    p->q.empty()) {
-                    continue;
-                }
                 int k = 0;
                 while (k < BATCH_DEQ) {
                     const auto rec = p->q.front();
@@ -478,6 +499,33 @@ private:
                     ++k;
                     did = true;
                 }
+                if (!p->active.load(std::memory_order_acquire) &&
+                    p->q.empty()) {
+                    if (prev) {
+                        prev->next = next;
+                        reclaimed_dropped_.fetch_add(
+                            p->dropped.load(std::memory_order_relaxed),
+                            std::memory_order_relaxed);
+                        delete p;
+                        p = next;
+                        continue;
+                    }
+                    ProducerNode* expected = p;
+                    if (head_.compare_exchange_strong(
+                            expected, next, std::memory_order_acq_rel,
+                            std::memory_order_acquire)) {
+                        reclaimed_dropped_.fetch_add(
+                            p->dropped.load(std::memory_order_relaxed),
+                            std::memory_order_relaxed);
+                        delete p;
+                        p = next;
+                        continue;
+                    }
+                    // A producer pushed new nodes in front; p is no longer
+                    // the head. Leave it for the next pass.
+                }
+                prev = p;
+                p = next;
             }
             if (!did) {
                 std::this_thread::yield();
@@ -508,6 +556,9 @@ private:
 
     static std::atomic<OverflowPolicy> policy_;
 
+    // Drops carried over from reclaimed producer nodes.
+    static std::atomic<uint64_t> reclaimed_dropped_;
+
     std::atomic<bool> done_{false};
     std::thread worker_;
 };
@@ -515,6 +566,7 @@ private:
 inline std::atomic<Logger::ProducerNode*> Logger::head_{nullptr};
 inline thread_local Logger::TL Logger::tls_{};
 inline std::atomic<OverflowPolicy> Logger::policy_{OverflowPolicy::Drop};
+inline std::atomic<uint64_t> Logger::reclaimed_dropped_{0};
 
 } // namespace steroidslog
 
