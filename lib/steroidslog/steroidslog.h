@@ -5,9 +5,10 @@
 
 #pragma once
 
-#include "misc/pseudomap.h"
 #include "misc/spsc_byte_ring.h"
 #include "misc/tsc_clock.h"
+
+#include <steroids/containers/id_map.h>
 
 #include <algorithm>
 #include <array>
@@ -40,6 +41,17 @@
 #endif
 
 namespace steroidslog {
+
+// Compile-time format ids come from the family's hash.
+using steroids::fnv1a_32;
+
+// Format-string registry: id → pointer to the static format literal.
+// steroids::id_map replaced the logger's private pseudomap — same lock-free
+// open addressing, wait-free readers, now shared across the family.
+inline auto& fmt_registry() {
+    static steroids::id_map<const char*, (std::size_t{1} << 16)> instance;
+    return instance;
+}
 
 //------------------------------------------------------------------------------
 // Tunables
@@ -408,11 +420,10 @@ private:
             std::memcpy(&argc, p, sizeof(argc));
             p += sizeof(argc);
 
-            std::string_view fmt(pseudomap::get(id));
+            const char* fmt_cstr = fmt_registry().get(id);
             // Fallback if not registered for some reason
-            if (fmt.empty()) {
-                fmt = std::string_view{"{}"};
-            }
+            std::string_view fmt =
+                fmt_cstr ? std::string_view{fmt_cstr} : std::string_view{"{}"};
 
             std::array<DecodedArg, MAX_ARGS> args{};
             const std::size_t n_args =
@@ -688,11 +699,9 @@ inline std::atomic<uint64_t> Logger::reclaimed_dropped_{0};
         if constexpr (LogLevel::level >= LogLevel::STEROIDSLOG_MIN_LEVEL) {    \
             constexpr uint32_t SL_CAT(_id_, __LINE__) =                        \
                 fnv1a_32(SL_LEVEL_PREFIX(level) fmt);                          \
-            [[maybe_unused]] static bool SL_CAT(_reg_, __LINE__) = [] {        \
-                pseudomap::get(SL_CAT(_id_, __LINE__)) =                       \
-                    std::string_view(SL_LEVEL_PREFIX(level) fmt);              \
-                return true;                                                   \
-            }();                                                               \
+            [[maybe_unused]] static bool SL_CAT(_reg_, __LINE__) =             \
+                fmt_registry().put(SL_CAT(_id_, __LINE__),                     \
+                                   SL_LEVEL_PREFIX(level) fmt);                \
             Logger::instance().enqueue<SL_CAT(_id_, __LINE__)>(               \
                 []() consteval {                                               \
                     return std::string_view(SL_LEVEL_PREFIX(level) fmt);      \
