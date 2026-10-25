@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <cstdint>
 #include <cstring>
 #include <format>
@@ -66,6 +67,7 @@ enum class ArgTag : uint8_t {
     I64 = 4,  // signed integers, rendered with their sign
     Bool = 5, // rendered as true/false, 1 payload byte
     Char = 6, // rendered as the character itself, 1 payload byte
+    F32 = 7,  // floats keep their own width for shortest round-trip output
 };
 
 namespace detail {
@@ -82,6 +84,8 @@ std::size_t encoded_size(const T& v) noexcept {
         return 1 + sizeof(uint64_t) + sizeof(uint32_t);
     } else if constexpr (std::is_same_v<U, bool> || std::is_same_v<U, char>) {
         return 1 + 1;
+    } else if constexpr (std::is_same_v<U, float>) {
+        return 1 + sizeof(float);
     } else if constexpr (std::is_integral_v<U> || std::is_floating_point_v<U>) {
         return 1 + sizeof(uint64_t);
     } else if constexpr (string_like<U>) {
@@ -125,6 +129,9 @@ void encode_arg(cursor& c, const T& v) noexcept {
     } else if constexpr (std::is_integral_v<U>) {
         c.put_val(static_cast<uint8_t>(ArgTag::U64));
         c.put_val(static_cast<uint64_t>(v));
+    } else if constexpr (std::is_same_v<U, float>) {
+        c.put_val(static_cast<uint8_t>(ArgTag::F32));
+        c.put_val(v);
     } else if constexpr (std::is_floating_point_v<U>) {
         c.put_val(static_cast<uint8_t>(ArgTag::F64));
         c.put_val(static_cast<double>(v));
@@ -335,7 +342,21 @@ private:
                     double v = 0;
                     std::memcpy(&v, p, sizeof(v));
                     p += sizeof(v);
-                    storage[i] = std::to_string(v);
+                    // Shortest round-trip form: 1e-8 stays 1e-08 instead of
+                    // collapsing to 0.000000 like std::to_string did.
+                    char buf[32];
+                    const auto res = std::to_chars(buf, buf + sizeof(buf), v);
+                    storage[i].assign(buf, res.ptr);
+                    views[i] = storage[i];
+                    break;
+                }
+                case ArgTag::F32: {
+                    float v = 0;
+                    std::memcpy(&v, p, sizeof(v));
+                    p += sizeof(v);
+                    char buf[32];
+                    const auto res = std::to_chars(buf, buf + sizeof(buf), v);
+                    storage[i].assign(buf, res.ptr);
                     views[i] = storage[i];
                     break;
                 }
