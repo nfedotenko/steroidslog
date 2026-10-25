@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <limits>
 #include <cstring>
 #include <sstream>
 #include <string>
@@ -28,6 +29,8 @@ TEST(Logger, EncodedSizeMatchesLayout) {
     // tag + 1 payload byte for bool and char
     EXPECT_EQ(detail::encoded_size(true), 2u);
     EXPECT_EQ(detail::encoded_size('x'), 2u);
+    // floats keep their own 4-byte width
+    EXPECT_EQ(detail::encoded_size(1.5f), 5u);
     // tag + u32 length + inline bytes for strings
     EXPECT_EQ(detail::encoded_size("hello"), 1u + 4u + 5u);
     EXPECT_EQ(detail::encoded_size(std::string(300, 'x')),
@@ -139,6 +142,30 @@ TEST(Logger, IntegerSignednessAndCharTypes) {
     EXPECT_NE(out.find("[INFO] ch=x"), std::string::npos);
     EXPECT_NE(out.find("[INFO] short=-42"), std::string::npos);
     EXPECT_NE(out.find("[INFO] uchar=200"), std::string::npos);
+}
+
+// Doubles render in shortest round-trip form via to_chars: tiny values do
+// not collapse to 0.000000, specials print as nan/inf.
+TEST(Logger, FloatingPointRendering) {
+    CoutCapture capture;
+
+    STERLOG_INFO("tiny={}", 1e-8);
+    STERLOG_INFO("tenth={}", 0.1);
+    STERLOG_INFO("big={}", 123456.789);
+    STERLOG_INFO("nan={}", std::numeric_limits<double>::quiet_NaN());
+    STERLOG_INFO("pinf={}", std::numeric_limits<double>::infinity());
+    STERLOG_INFO("ninf={}", -std::numeric_limits<double>::infinity());
+    STERLOG_INFO("f32={}", 1.234f);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    auto out = capture.capture.str();
+    EXPECT_NE(out.find("[INFO] tiny=1e-08"), std::string::npos);
+    EXPECT_NE(out.find("[INFO] tenth=0.1\n"), std::string::npos);
+    EXPECT_NE(out.find("[INFO] big=123456.789\n"), std::string::npos);
+    EXPECT_NE(out.find("[INFO] nan=nan"), std::string::npos);
+    EXPECT_NE(out.find("[INFO] pinf=inf"), std::string::npos);
+    EXPECT_NE(out.find("[INFO] ninf=-inf"), std::string::npos);
+    EXPECT_NE(out.find("[INFO] f32=1.234\n"), std::string::npos);
 }
 
 // Strings are copied into the record at the call site: logging a temporary
