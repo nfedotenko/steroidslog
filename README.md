@@ -5,18 +5,6 @@
 
 Steroidslog is a tiny, high‑throughput C++20 logger built for ultra-low latency workloads. The hot path is lock‑free and allocation‑free: a per‑thread SPSC queue records the *format id + raw arguments* in a compact layout and hands them off to a dedicated logger thread which performs the actual formatting and I/O.
 
-<p align="center">
-  <img src="docs/figure5_1t.jpg" alt="Figure 5 style (1 thread)" width="70%"/>
-  <br/>
-  <em>Single-thread microbenchmarks (higher is better)</em>
-</p>
-
-<p align="center">
-  <img src="docs/figure5_4t.jpg" alt="Figure 5 style (4 threads)" width="70%"/>
-  <br/>
-  <em>4-thread microbenchmarks (higher is better)</em>
-</p>
-
 ## Why another logger?
 
 - **Hot‑path cost matters.** In low‑latency systems you pay for every instruction on your producer threads. Steroidslog eliminates formatting and syscalls from the producing thread, pushing them to a single consumer.
@@ -32,35 +20,12 @@ Steroidslog is a tiny, high‑throughput C++20 logger built for ultra-low latenc
 
 ## Performance
 
-Environment: `AMD Ryzen 9 8945HS @ 3.97GHz, Ubuntu 24.04, gcc‑13 -O3 -march=native`
-
-Numbers below are the mean **wall time (ns)** and **throughput (10<sup>6</sup> msgs/s)** obtained from running the [benchmark script](https://github.com/nfedotenko/steroidslog/blob/main/bench/scripts/run_benchmark.sh). Tests mirror the classic "Figure 5"-style microbenchmarks. See the plots above.
-
-### Single-thread
-
-| Test | steroidslog | spdlog | quill | fmtlog |
-| :-- | :--: | :--: | :--: | :--: |
-| **staticString** | 9.7 ns, 206.19 M/s | 65.4 ns, 30.68 M/s | 259.5 ns, 19.79 M/s | 31.7 ns, 108.48 M/s |
-| **stringConcat** | 9.3 ns, 214.07 M/s | 104.1 ns, 19.26 M/s | 461.1 ns, 17.75 M/s | 29.4 ns, 107.06 M/s |
-| **singleInteger** | 13.7 ns, 145.83 M/s | 134.1 ns, 14.93 M/s | 306.5 ns, 21.5 M/s | 29.9 ns, 106.81 M/s |
-| **twoIntegers** | 10.2 ns, 197.07 M/s | 148.5 ns, 13.48 M/s | 330.7 ns, 20.87 M/s | 29.7 ns, 107.25 M/s |
-| **singleDouble** | 11.2 ns, 178.52 M/s | 203.7 ns, 9.83 M/s | 419.8 ns, 19.31 M/s | 29.7 ns, 107.18 M/s |
-| **complexFormat** | 12.1 ns, 166.29 M/s | 238.7 ns, 8.38 M/s | 542.2 ns, 16.89 M/s | 29.7 ns, 107.27 M/s |
-
-### 4 threads
-
-| Test | steroidslog | spdlog | quill | fmtlog |
-| :-- | :--: | :--: | :--: | :--: |
-| **staticString** | 7.1 ns, 185.58 M/s | 42.7 ns, 30.34 M/s | - | 14.7 ns, 105.91 M/s |
-| **stringConcat** | 7.1 ns, 182.12 M/s | 68.3 ns, 18.95 M/s | - | 14 ns, 109.5 M/s |
-| **singleInteger** | 9.5 ns, 134.28 M/s | 88.4 ns, 14.65 M/s | - | 14.2 ns, 109.24 M/s |
-| **twoIntegers** | 6.9 ns, 190.55 M/s | 98.1 ns, 13.18 M/s | - | 14.4 ns, 107.98 M/s |
-| **singleDouble** | 7.7 ns, 167.25 M/s | 131.1 ns, 9.96 M/s | - | 14.4 ns, 107.96 M/s |
-| **complexFormat** | 8.1 ns, 158.81 M/s | 158.1 ns, 8.19 M/s | - | 14.3 ns, 108.84 M/s |
-
-> [!CAUTION]
-> Benchmarks are microbenchmarks; real apps will vary with I/O, sinks, and contention patterns.
-> Reproduce locally before drawing conclusions.
+The published comparison against spdlog/quill/fmtlog is temporarily withdrawn: the logger core
+is being reworked (correctness fixes, producer-side timestamps, overflow policies), and the old
+numbers measured mean call time rather than latency percentiles, with competitor configurations
+that need revisiting. A fair, reproducible benchmark suite — per-call latency histograms
+(p50/p99/p99.9), identical sinks, drop counts for every logger, raw data and scripts in the
+repo — will land together with the rework.
 
 ## Usage
 
